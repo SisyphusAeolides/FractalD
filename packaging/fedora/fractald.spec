@@ -2,7 +2,7 @@ Name:           fractald
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        FractalD service manager and compatibility layer
-License:        NOASSERTION
+License:        GPL-2.0-or-later
 URL:            https://github.com/SisyphusAeolides/FractalD
 Source0:        %{name}-%{version}.tar.gz
 
