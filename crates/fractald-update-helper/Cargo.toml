@@ -1,0 +1,15 @@
+[package]
+name = "fractald-update-helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-control = { path = "../fractald-control" }
+
+[[bin]]
+name = "systemd-update-helper"
+path = "src/main.rs"

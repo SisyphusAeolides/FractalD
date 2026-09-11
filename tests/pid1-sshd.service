@@ -1,0 +1,10 @@
+[Unit]
+Description=PID1 validation SSH service
+Requires=pid1-network.service
+After=pid1-network.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/fractald-pid1-test/sshd
+Restart=on-failure
+KillMode=control-group

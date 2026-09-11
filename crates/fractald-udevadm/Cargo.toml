@@ -1,0 +1,12 @@
+[package]
+name = "fractald-udevadm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "udevadm"
+path = "src/main.rs"

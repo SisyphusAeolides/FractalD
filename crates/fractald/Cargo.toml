@@ -1,0 +1,17 @@
+[package]
+name = "fractald"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-chaos = { path = "../fractald-chaos" }
+fractald-config = { path = "../fractald-config" }
+fractald-control = { path = "../fractald-control" }
+fractald-core = { path = "../fractald-core" }
+fractald-platform = { path = "../fractald-platform" }
+fractald-supervisor = { path = "../fractald-supervisor" }
+fractald-storage = { path = "../fractald-storage" }

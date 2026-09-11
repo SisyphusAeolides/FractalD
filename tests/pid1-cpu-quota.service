@@ -1,0 +1,11 @@
+[Unit]
+Description=PID1 validation cgroup CPU quota
+After=pid1-network.service
+
+[Service]
+Type=oneshot
+CPUQuota=50%
+CPUQuotaPeriodSec=100ms
+Delegate=cpu memory
+ExecStart=/usr/local/libexec/fractald-pid1-test/cpu-quota
+RemainAfterExit=yes

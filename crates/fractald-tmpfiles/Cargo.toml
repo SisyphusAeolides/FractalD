@@ -1,0 +1,15 @@
+[package]
+name = "fractald-tmpfiles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-platform = { path = "../fractald-platform" }
+
+[[bin]]
+name = "systemd-tmpfiles"
+path = "src/main.rs"

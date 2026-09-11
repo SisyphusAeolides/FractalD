@@ -1,0 +1,12 @@
+[package]
+name = "fractald-sysctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "systemd-sysctl"
+path = "src/main.rs"

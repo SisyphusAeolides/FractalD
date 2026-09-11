@@ -1,0 +1,9 @@
+[Unit]
+Description=PID1 validation readiness and Chaos workload
+Requires=pid1-network.service
+After=pid1-network.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/fractald-pid1-test/ready
+RemainAfterExit=yes

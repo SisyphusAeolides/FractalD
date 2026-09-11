@@ -1,0 +1,12 @@
+[package]
+name = "fractald-detect-virt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "systemd-detect-virt"
+path = "src/main.rs"

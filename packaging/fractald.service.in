@@ -1,0 +1,16 @@
+[Unit]
+Description=FractalD service manager
+After=local-fs.target
+ConditionFileIsExecutable=@FRACTALD_BINDIR@/fractald
+
+[Service]
+Type=simple
+ExecStart=@FRACTALD_BINDIR@/fractald daemon
+Restart=on-failure
+RestartSec=1s
+KillMode=control-group
+RuntimeDirectory=fractald
+StateDirectory=fractald
+
+[Install]
+WantedBy=multi-user.target

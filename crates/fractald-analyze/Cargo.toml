@@ -1,0 +1,15 @@
+[package]
+name = "fractald-analyze"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-config = { path = "../fractald-config" }
+
+[[bin]]
+name = "systemd-analyze"
+path = "src/main.rs"

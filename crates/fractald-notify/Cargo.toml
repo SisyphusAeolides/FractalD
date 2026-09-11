@@ -1,0 +1,16 @@
+[package]
+name = "fractald-notify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-control = { path = "../fractald-control" }
+fractald-platform = { path = "../fractald-platform" }
+
+[[bin]]
+name = "systemd-notify"
+path = "src/main.rs"

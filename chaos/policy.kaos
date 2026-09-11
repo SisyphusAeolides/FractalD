@@ -1,0 +1,19 @@
+dict def default_policy()
+    dict policy = {'restart': 'on-failure', 'start_timeout_ms': 30000, 'stop_timeout_ms': 5000}
+    return policy
+end
+
+dict def chaos_systems()
+    dict systems = {
+        'lorenz': 'continuous attractor',
+        'mandelbrot': 'escape-time field',
+        'lyapunov': 'stability metric',
+        'rossler': 'continuous attractor',
+        'logistic-map': 'discrete map',
+        'duffing': 'driven oscillator'
+    }
+    return systems
+end
+
+print default_policy()
+print chaos_systems()

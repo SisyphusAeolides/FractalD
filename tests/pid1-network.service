@@ -1,0 +1,7 @@
+[Unit]
+Description=PID1 validation network setup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/fractald-pid1-test/network
+RemainAfterExit=yes

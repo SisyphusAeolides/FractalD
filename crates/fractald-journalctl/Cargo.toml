@@ -1,0 +1,24 @@
+[package]
+name = "fractald-journalctl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-journal = { path = "../fractald-journal" }
+fractald-platform = { path = "../fractald-platform" }
+
+[[bin]]
+name = "journalctl"
+path = "src/main.rs"
+
+[[bin]]
+name = "systemd-cat"
+path = "src/cat.rs"
+
+[[bin]]
+name = "systemd-journald"
+path = "src/journald.rs"

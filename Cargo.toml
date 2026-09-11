@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    "crates/fractald-core",
+    "crates/fractald-config",
+    "crates/fractald-storage",
+    "crates/fractald-supervisor",
+    "crates/fractald-chaos",
+    "crates/rustybox",
+    "crates/fractald-control",
+    "crates/fractald-platform",
+    "crates/fractald",
+    "crates/fractalctl",
+    "crates/fractald-systemctl",
+    "crates/fractald-resolved",
+    "crates/fractald-resolver",
+    "crates/fractald-resolvectl",
+    "crates/fractald-journalctl",
+    "crates/fractald-journal",
+    "crates/fractald-escape",
+    "crates/fractald-rc",
+    "crates/fractald-notify",
+    "crates/fractald-tmpfiles",
+    "crates/fractald-sysusers",
+    "crates/fractald-sysctl",
+    "crates/fractald-update-helper",
+    "crates/fractald-machine-id",
+    "crates/fractald-detect-virt",
+    "crates/fractald-analyze",
+    "crates/fractald-kernel-install",
+    "crates/fractald-udevadm",
+    "crates/fractald-launch",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

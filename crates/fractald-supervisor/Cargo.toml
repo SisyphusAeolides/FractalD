@@ -1,0 +1,13 @@
+[package]
+name = "fractald-supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-core = { path = "../fractald-core" }
+fractald-journal = { path = "../fractald-journal" }
+fractald-platform = { path = "../fractald-platform" }

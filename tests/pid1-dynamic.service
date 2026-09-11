@@ -1,0 +1,10 @@
+[Unit]
+Description=PID1 validation transient dynamic identity
+After=pid1-network.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+RuntimeDirectory=fractald-pid1-dynamic
+ExecStart=/usr/local/libexec/fractald-pid1-test/dynamic
+RemainAfterExit=yes

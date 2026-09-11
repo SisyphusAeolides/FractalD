@@ -1,0 +1,16 @@
+[package]
+name = "fractald-resolved"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-resolver = { path = "../fractald-resolver" }
+fractald-platform = { path = "../fractald-platform" }
+
+[[bin]]
+name = "fractald-resolved"
+path = "src/main.rs"

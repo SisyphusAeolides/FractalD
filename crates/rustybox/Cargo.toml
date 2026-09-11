@@ -1,0 +1,19 @@
+[package]
+name = "rustybox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fractald-chaos = { path = "../fractald-chaos" }
+
+[build-dependencies]
+cc = "1.2"
+
+[[bin]]
+name = "rustybox"
+path = "src/main.rs"
