@@ -3,7 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        FractalD service manager and compatibility layer
 License:        NOASSERTION
-URL:            https://copr.fedorainfracloud.org/coprs/sisyphuscode/fractald
+URL:            https://github.com/SisyphusAeolides/FractalD
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  cargo
