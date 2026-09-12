@@ -10,6 +10,15 @@ The project has three layers:
 
 The repository currently contains a working service-manager slice: systemd-style unit parsing, standard unit search paths with drop-ins, target transactions, socket activation, timer and path triggers, mount and swap units, synthetic device units, slice lifecycle nodes, eager automount transactions, manager shutdown action units, `RequiresMountsFor=` path-derived mount ordering, `DefaultDependencies=` type-specific ordering and shutdown conflicts, `StopWhenUnneeded=` reclamation, template instances, conditions, `ExecCondition`, environment files, managed credential files, runtime/state/cache/log directory setup, service output forwarding with local logs and rotation, notify and forking services, credential-checked `NotifyAccess` readiness and watchdog messages, pidfd and process-group supervision, parent-death cleanup, restart backoff, persistent enablement, a durable bounded state event log, optional cgroup v2 resource ownership, a local daemon control socket, `fractalctl`, and a `systemctl` compatibility binary. OpenRC scripts, runlevels, `rc-service`, and `rc-status` are handled through a separate shell adapter. The workspace also contains a Rust/C RustyBox multi-call userland with a deterministic chaos applet.
 
+## Arch-first development
+
+Arch Linux and CachyOS are the primary development environments for FractalD.
+Install the native build toolchain before running the checks:
+
+```sh
+sudo pacman -S --needed base-devel rust clang
+```
+
 ## Build
 
 ```sh
@@ -22,7 +31,7 @@ make recovery-check
 make package-check
 make rustybox-check
 make pid1-check                 # run inside a direct PID1 validation boot
-make pid1-storage-check         # run inside the Fedora storage matrix boot
+make pid1-storage-check         # run inside the Arch storage matrix boot
 make pid1-storage-recovery-check # cycle providers and remount through FractalD
 make pid1-static-initramfs      # build an independent, pruned boot image
 ```
@@ -63,14 +72,14 @@ The compatibility binary is named `systemctl` when installed with FractalD. It f
 
 The optional `fractald-resolved` binary is installed with the package and can be enabled as `fractald-resolved.service`. It reads `FRACTALD_RESOLVED_UPSTREAM` or the nameservers in `FRACTALD_RESOLV_CONF`, and listens on `FRACTALD_RESOLVED_LISTEN` (`127.0.0.53:53` by default). `FRACTALD_RESOLVED_TIMEOUT_MS` and `FRACTALD_RESOLVED_CACHE_ENTRIES` bound forwarding behavior; `FRACTALD_RESOLVED_FAULT=drop`, `servfail`, or `delay:MILLISECONDS` provides deterministic outage testing. `make nss` builds the optional `libnss_fractald.so.2` forward and reverse lookup module; set `NSSLIBDIR` for a distribution’s NSS library directory and add `fractald` to the `hosts` line in `nsswitch.conf` when enabling it.
 
-The package also provides `systemd-sysusers`. It consumes the standard `sysusers.d` files used by Fedora and Debian package scripts, creates system accounts and groups without delegating to a systemd manager, and supports alternate roots, replacement or inline package input, dry runs, configuration inspection, dynamic ID ranges, and group membership records.
+The package also provides `systemd-sysusers`. It consumes standard `sysusers.d` files used by Linux package scripts, creates system accounts and groups without delegating to a systemd manager, and supports alternate roots, replacement or inline package input, dry runs, configuration inspection, dynamic ID ranges, and group membership records.
 
 `systemd-sysctl` applies the ordered `sysctl.d` rules used by package and boot scripts, including administrator overrides, ignored failures, wildcard interface keys, alternate roots, prefixes, strict validation, and dry-run inspection.
 
 `systemd-update-helper` provides package transaction operations for unit enablement, restart and reload markers, and user-manager reexec compatibility without requiring systemd to be running.
 
 `systemd-machine-id-setup`, `systemd-detect-virt`, and `systemd-analyze` cover common package setup, virtualization conditionals, configuration inspection, and typed unit verification. `systemctl daemon-reexec` remains a successful no-op because FractalD owns its manager process directly.
-`kernel-install` handles Fedora-style BLS kernel and initrd transactions independently of a systemd manager, including alternate-root test images and administrator install hooks.
+`kernel-install` handles BLS kernel and initrd transactions independently of a systemd manager, including alternate-root test images and administrator install hooks.
 `udevadm` supplies native trigger, device-property, settle, rules-control, and hwdb-update compatibility operations. The same binary provides a small kernel-uevent listener when invoked as `systemd-udevd`; its sysfs, queue, and runtime roots can be isolated for image tests.
 
 `FailureAction=` and `SuccessAction=` are handled by FractalD's native supervisor. A newly failed unit or successfully completed service can request an exit, halt, poweroff, or reboot family action; FractalD finishes its own ordered service shutdown before invoking the Linux power operation when it is PID 1.
