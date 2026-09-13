@@ -12,13 +12,13 @@ fractald-journal = { path = "../fractald-journal" }
 fractald-platform = { path = "../fractald-platform" }
 
 [[bin]]
-name = "journalctl"
+name = "fractald-journalctl"
 path = "src/main.rs"
 
 [[bin]]
-name = "systemd-cat"
+name = "fractald-cat"
 path = "src/cat.rs"
 
 [[bin]]
-name = "systemd-journald"
+name = "fractald-journald"
 path = "src/journald.rs"

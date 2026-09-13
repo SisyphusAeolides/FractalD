@@ -1,0 +1,13 @@
+[Trigger]
+Type=Path
+Operation=Install
+Operation=Upgrade
+Operation=Remove
+Target=usr/lib/fractald/services/*.svc
+Target=usr/local/lib/fractald/services/*.svc
+Target=etc/fractald/services/*.svc
+
+[Action]
+Description=Refreshing FractalD package service registry
+When=PostTransaction
+Exec=/usr/bin/sh -c "if test -x /usr/bin/fractald-package-trigger; then exec /usr/bin/fractald-package-trigger sync; fi"

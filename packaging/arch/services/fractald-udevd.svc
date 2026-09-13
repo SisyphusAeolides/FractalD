@@ -1,0 +1,10 @@
+[service]
+description=FractalD native device event daemon
+kind=simple
+exec=/usr/bin/fractald-udevd --foreground
+restart=on-failure
+stdout=inherit
+stderr=inherit
+
+[install]
+profile=boot

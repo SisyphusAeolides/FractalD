@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("systemd-journald: {error}");
+            eprintln!("fractald-journald: {error}");
             ExitCode::from(1)
         }
     }
@@ -25,12 +25,12 @@ fn run() -> Result<(), String> {
         match argument.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "systemd-journald (FractalD)\n\nUsage: systemd-journald [--system|--user]\n\nReceives native journal datagrams and writes FractalD's local per-unit sink."
+                    "fractald-journald (FractalD)\n\nUsage: fractald-journald [--system|--user]\n\nReceives native journal datagrams and writes FractalD's local per-unit sink."
                 );
                 return Ok(());
             }
             "--version" => {
-                println!("systemd-journald (FractalD) {}", env!("CARGO_PKG_VERSION"));
+                println!("fractald-journald (FractalD) {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--system" | "--user" | "--unit=" | "--namespace=" => {}
@@ -41,7 +41,7 @@ fn run() -> Result<(), String> {
 
     let endpoint = env::var_os("FRACTALD_JOURNAL_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/run/systemd/journal/socket"));
+        .unwrap_or_else(|| PathBuf::from("/run/fractald/journal/socket"));
     let sockets = match inherited_sockets()? {
         Some(sockets) => sockets,
         None => vec![bind_endpoint(&endpoint)?],
@@ -141,9 +141,9 @@ fn receive_loop(socket: UnixDatagram, log_directory: &Path) -> Result<(), String
         };
         let fields = parse_fields(&buffer[..length]);
         let unit = fields
-            .get("_SYSTEMD_UNIT")
+            .get("FRACTALD_SERVICE")
             .map(String::as_str)
-            .unwrap_or("systemd-journald");
+            .unwrap_or("fractald-journald");
         let stream = fields
             .get("_STREAM")
             .map(String::as_str)
@@ -162,7 +162,7 @@ fn parse_fields(payload: &[u8]) -> BTreeMap<String, String> {
 }
 
 fn append_record(directory: &Path, unit: &str, stream: &str, message: &str) -> Result<(), String> {
-    let unit = safe_component(unit, "systemd-journald");
+    let unit = safe_component(unit, "fractald-journald");
     let stream = safe_component(stream, "stdout");
     let path = directory.join(format!("{unit}.{stream}.log"));
     let mut file = OpenOptions::new();

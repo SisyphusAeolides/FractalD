@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("systemd-sysusers: {error}");
+            eprintln!("fractald-sysusers: {error}");
             ExitCode::from(1)
         }
     }
@@ -28,7 +28,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     if options.show_version {
-        println!("systemd-sysusers (FractalD) {}", env!("CARGO_PKG_VERSION"));
+        println!("fractald-sysusers (FractalD) {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -1017,7 +1017,7 @@ impl TextDatabase {
 
 fn print_help() {
     println!(
-        "systemd-sysusers (FractalD)\n\nCreates system users and groups from sysusers.d configuration.\n\nUsage: systemd-sysusers [OPTIONS] [CONFIGURATION FILE...]\n\n  --root=PATH       operate below an alternate filesystem root\n  --replace=PATH    replace a configuration file with supplied input\n  --inline          treat positional arguments as configuration lines\n  --dry-run         report changes without writing account databases\n  --cat-config      print selected configuration files\n  --tldr            print non-comment configuration lines\n  --version         show the version"
+        "fractald-sysusers (FractalD)\n\nCreates system users and groups from sysusers.d configuration.\n\nUsage: fractald-sysusers [OPTIONS] [CONFIGURATION FILE...]\n\n  --root=PATH       operate below an alternate filesystem root\n  --replace=PATH    replace a configuration file with supplied input\n  --inline          treat positional arguments as configuration lines\n  --dry-run         report changes without writing account databases\n  --cat-config      print selected configuration files\n  --tldr            print non-comment configuration lines\n  --version         show the version"
     );
 }
 

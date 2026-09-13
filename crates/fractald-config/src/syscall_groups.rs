@@ -1,4 +1,4 @@
-// Generated from the host systemd syscall group definitions.
+// Native syscall groups used by FractalD.
 pub(crate) fn expand_group(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "@sandbox" => Some(&[
@@ -913,10 +913,12 @@ pub(crate) fn expand_group(name: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_known_syscall(name: &str) -> bool {
     KNOWN_SYSCALLS.contains(&name)
 }
 
+#[allow(dead_code)]
 const KNOWN_SYSCALLS: &[&str] = &[
     "_llseek",
     "_newselect",

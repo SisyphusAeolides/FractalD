@@ -112,15 +112,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractald-package-trigger"
+version = "0.1.0"
+dependencies = [
+ "fractald-config",
+ "fractald-control",
+]
+
+[[package]]
 name = "fractald-platform"
 version = "0.1.0"
 dependencies = [
  "cc",
 ]
-
-[[package]]
-name = "fractald-rc"
-version = "0.1.0"
 
 [[package]]
 name = "fractald-resolvectl"
@@ -162,14 +166,6 @@ name = "fractald-sysctl"
 version = "0.1.0"
 
 [[package]]
-name = "fractald-systemctl"
-version = "0.1.0"
-dependencies = [
- "fractald-control",
- "fractald-platform",
-]
-
-[[package]]
 name = "fractald-sysusers"
 version = "0.1.0"
 
@@ -183,13 +179,6 @@ dependencies = [
 [[package]]
 name = "fractald-udevadm"
 version = "0.1.0"
-
-[[package]]
-name = "fractald-update-helper"
-version = "0.1.0"
-dependencies = [
- "fractald-control",
-]
 
 [[package]]
 name = "rustybox"

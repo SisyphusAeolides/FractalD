@@ -9,7 +9,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("systemd-sysctl: {error}");
+            eprintln!("fractald-sysctl: {error}");
             ExitCode::from(1)
         }
     }
@@ -22,7 +22,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     if options.show_version {
-        println!("systemd-sysctl (FractalD) {}", env!("CARGO_PKG_VERSION"));
+        println!("fractald-sysctl (FractalD) {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let sources = load_sources(&options)?;
@@ -332,7 +332,7 @@ fn apply_sources(options: &Options, sources: &[Source]) -> Result<(), String> {
         return Err(failures.join("; "));
     }
     for failure in failures {
-        eprintln!("systemd-sysctl: {failure}");
+        eprintln!("fractald-sysctl: {failure}");
     }
     Ok(())
 }
@@ -421,7 +421,7 @@ fn root_path(root: &Path, path: &Path) -> PathBuf {
 
 fn print_help() {
     println!(
-        "systemd-sysctl (FractalD)\n\nApply sysctl.d configuration without a systemd manager.\n\nUsage: systemd-sysctl [OPTIONS] [CONFIGURATION FILE...]\n\n  --root=PATH       operate below an alternate root\n  --prefix=PREFIX   apply only matching keys\n  --strict          fail if a rule cannot be applied\n  --dry-run         print changes without writing\n  --cat-config      print selected configuration files\n  --tldr            print non-comment configuration lines\n  --version         show the version"
+        "fractald-sysctl (FractalD)\n\nApply sysctl.d configuration without another service manager.\n\nUsage: fractald-sysctl [OPTIONS] [CONFIGURATION FILE...]\n\n  --root=PATH       operate below an alternate root\n  --prefix=PREFIX   apply only matching keys\n  --strict          fail if a rule cannot be applied\n  --dry-run         print changes without writing\n  --cat-config      print selected configuration files\n  --tldr            print non-comment configuration lines\n  --version         show the version"
     );
 }
 

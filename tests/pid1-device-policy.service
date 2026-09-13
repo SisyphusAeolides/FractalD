@@ -1,9 +1,0 @@
-[Unit]
-Description=FractalD direct PID1 device policy check
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/libexec/fractald-pid1-test/device-policy
-DevicePolicy=closed
-DeviceAllow=/dev/null rw
-RemainAfterExit=yes

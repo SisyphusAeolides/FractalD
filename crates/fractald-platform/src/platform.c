@@ -2111,6 +2111,153 @@ int fractald_power_action(int action)
 #endif
 }
 
+static int ensure_pid1_directory(const char *path, mode_t mode)
+{
+    if (mkdir(path, mode) == 0) {
+        return 0;
+    }
+    if (errno != EEXIST) {
+        return -1;
+    }
+    struct stat metadata;
+    if (stat(path, &metadata) < 0) {
+        return -1;
+    }
+    if (!S_ISDIR(metadata.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    return 0;
+}
+
+static int mount_pid1_filesystem(
+    const char *source,
+    const char *target,
+    const char *filesystem,
+    unsigned long flags,
+    const char *options)
+{
+    if (mount(source, target, filesystem, flags, options) < 0 && errno != EBUSY) {
+        return -1;
+    }
+    return 0;
+}
+
+static int make_pid1_device(
+    const char *path,
+    mode_t mode,
+    unsigned int major_number,
+    unsigned int minor_number)
+{
+    struct stat metadata;
+    if (lstat(path, &metadata) == 0) {
+        return 0;
+    }
+    if (errno != ENOENT) {
+        return -1;
+    }
+    return mknod(path, S_IFCHR | mode, makedev(major_number, minor_number));
+}
+
+int fractald_prepare_pid1_mounts(void)
+{
+    if (getpid() != (pid_t)1) {
+        errno = EPERM;
+        return -1;
+    }
+
+    const struct {
+        const char *path;
+        mode_t mode;
+    } directories[] = {
+        {"/proc", 0555},
+        {"/sys", 0555},
+        {"/sys/fs", 0555},
+        {"/run", 0755},
+        {"/dev", 0755},
+        {"/sys/fs/cgroup", 0555},
+        {"/dev/pts", 0755},
+        {"/dev/shm", 01777},
+        {"/dev/mqueue", 0755},
+    };
+    for (size_t index = 0U; index < sizeof(directories) / sizeof(directories[0]); ++index) {
+        if (ensure_pid1_directory(directories[index].path, directories[index].mode) < 0) {
+            return -1;
+        }
+    }
+
+    if (mount_pid1_filesystem(
+            "proc",
+            "/proc",
+            "proc",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC,
+            NULL) < 0
+        || mount_pid1_filesystem(
+            "sysfs",
+            "/sys",
+            "sysfs",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC,
+            NULL) < 0
+        || mount_pid1_filesystem(
+            "tmpfs",
+            "/run",
+            "tmpfs",
+            MS_NOSUID | MS_NODEV,
+            "mode=0755") < 0
+        || mount_pid1_filesystem(
+            "cgroup2",
+            "/sys/fs/cgroup",
+            "cgroup2",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC,
+            NULL) < 0) {
+        return -1;
+    }
+
+    if (mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID | MS_NOEXEC, "mode=0755") < 0
+        && errno != EBUSY) {
+        if (errno != ENODEV && errno != EINVAL && errno != EPERM) {
+            return -1;
+        }
+        if (mount_pid1_filesystem(
+                "tmpfs",
+                "/dev",
+                "tmpfs",
+                MS_NOSUID | MS_NOEXEC,
+                "mode=0755") < 0) {
+            return -1;
+        }
+        if (make_pid1_device("/dev/null", 0666, 1U, 3U) < 0
+            || make_pid1_device("/dev/zero", 0666, 1U, 5U) < 0
+            || make_pid1_device("/dev/random", 0666, 1U, 8U) < 0
+            || make_pid1_device("/dev/urandom", 0666, 1U, 9U) < 0
+            || make_pid1_device("/dev/tty", 0666, 5U, 0U) < 0
+            || make_pid1_device("/dev/console", 0600, 5U, 1U) < 0) {
+            return -1;
+        }
+    }
+    if (mount_pid1_filesystem(
+            "devpts",
+            "/dev/pts",
+            "devpts",
+            MS_NOSUID | MS_NOEXEC,
+            "newinstance,ptmxmode=0666,mode=0620") < 0
+        || mount_pid1_filesystem(
+            "tmpfs",
+            "/dev/shm",
+            "tmpfs",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC,
+            "mode=1777") < 0
+        || mount_pid1_filesystem(
+            "mqueue",
+            "/dev/mqueue",
+            "mqueue",
+            MS_NOSUID | MS_NODEV | MS_NOEXEC,
+            NULL) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int fractald_set_child_subreaper(void)
 {
 #ifdef PR_SET_CHILD_SUBREAPER

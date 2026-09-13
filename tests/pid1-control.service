@@ -1,7 +1,0 @@
-[Unit]
-Description=PID1 validation controlled long-running service
-
-[Service]
-Type=simple
-ExecStart=/usr/local/libexec/fractald-pid1-test/control
-KillMode=control-group

@@ -267,7 +267,7 @@ impl DependencyGraph {
         (edges, indegree)
     }
 
-    /// Return the explicit and path-derived required dependencies for a unit.
+    /// Return the explicit and path-derived required dependencies for a service.
     ///
     /// `RequiresMountsFor=` is represented as a path in a `ServiceSpec` because
     /// the corresponding mount unit may be discovered independently of the
@@ -301,122 +301,23 @@ impl DependencyGraph {
     }
 
     fn default_required_dependencies(&self, name: &str) -> BTreeSet<String> {
-        let mut dependencies = BTreeSet::new();
-        let Some(service) = self.services.get(name) else {
-            return dependencies;
-        };
-        if !service.default_dependencies
-            || !matches!(
-                unit_kind(service),
-                UnitKind::Service | UnitKind::Socket | UnitKind::Timer | UnitKind::Path
-            )
-        {
-            return dependencies;
-        }
-        insert_if_loaded(&self.services, &mut dependencies, "sysinit.target");
-        dependencies
+        let _ = name;
+        BTreeSet::new()
     }
 
     fn default_after_dependencies(&self, name: &str) -> BTreeSet<String> {
-        let mut dependencies = BTreeSet::new();
-        let Some(service) = self.services.get(name) else {
-            return dependencies;
-        };
-        if !service.default_dependencies {
-            return dependencies;
-        }
-        match unit_kind(service) {
-            UnitKind::Service => {
-                insert_if_loaded(&self.services, &mut dependencies, "sysinit.target");
-                insert_if_loaded(&self.services, &mut dependencies, "basic.target");
-            }
-            UnitKind::Socket | UnitKind::Timer | UnitKind::Path => {
-                insert_if_loaded(&self.services, &mut dependencies, "sysinit.target");
-            }
-            UnitKind::Mount | UnitKind::Swap => {
-                insert_if_loaded(&self.services, &mut dependencies, "local-fs-pre.target");
-            }
-            UnitKind::Device => {}
-            UnitKind::Automount => {
-                insert_if_loaded(&self.services, &mut dependencies, "local-fs-pre.target");
-            }
-            UnitKind::Slice => {}
-            UnitKind::Target | UnitKind::Other => {}
-        }
-        dependencies
+        let _ = name;
+        BTreeSet::new()
     }
 
     fn default_before_dependencies(&self, name: &str) -> BTreeSet<String> {
-        let mut dependencies = BTreeSet::new();
-        let Some(service) = self.services.get(name) else {
-            return dependencies;
-        };
-        if !service.default_dependencies {
-            return dependencies;
-        }
-        match unit_kind(service) {
-            UnitKind::Service | UnitKind::Target => {
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Socket => {
-                insert_if_loaded(&self.services, &mut dependencies, "sockets.target");
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Timer => {
-                insert_if_loaded(&self.services, &mut dependencies, "timers.target");
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Path => {
-                insert_if_loaded(&self.services, &mut dependencies, "paths.target");
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Mount => {
-                insert_if_loaded(&self.services, &mut dependencies, "umount.target");
-            }
-            UnitKind::Swap => {
-                insert_if_loaded(&self.services, &mut dependencies, "swap.target");
-                insert_if_loaded(&self.services, &mut dependencies, "umount.target");
-            }
-            UnitKind::Device => {}
-            UnitKind::Automount => {
-                insert_if_loaded(&self.services, &mut dependencies, "umount.target");
-            }
-            UnitKind::Slice => {
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Other => {}
-        }
-        dependencies.remove(name);
-        dependencies
+        let _ = name;
+        BTreeSet::new()
     }
 
     fn default_conflict_dependencies(&self, name: &str) -> BTreeSet<String> {
-        let mut dependencies = BTreeSet::new();
-        let Some(service) = self.services.get(name) else {
-            return dependencies;
-        };
-        if !service.default_dependencies {
-            return dependencies;
-        }
-        match unit_kind(service) {
-            UnitKind::Service
-            | UnitKind::Target
-            | UnitKind::Socket
-            | UnitKind::Timer
-            | UnitKind::Path => {
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Mount | UnitKind::Swap => {
-                insert_if_loaded(&self.services, &mut dependencies, "umount.target");
-            }
-            UnitKind::Device => {}
-            UnitKind::Automount | UnitKind::Slice => {
-                insert_if_loaded(&self.services, &mut dependencies, "shutdown.target");
-            }
-            UnitKind::Other => {}
-        }
-        dependencies.remove(name);
-        dependencies
+        let _ = name;
+        BTreeSet::new()
     }
 
     fn mount_dependencies(&self, name: &str) -> BTreeSet<String> {
@@ -498,65 +399,6 @@ impl DependencyGraph {
                     .then_some(mount_name.clone())
             })
             .collect()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UnitKind {
-    Service,
-    Socket,
-    Target,
-    Timer,
-    Path,
-    Mount,
-    Swap,
-    Device,
-    Automount,
-    Slice,
-    Other,
-}
-
-fn unit_kind(service: &ServiceSpec) -> UnitKind {
-    if service.name.ends_with(".target") {
-        return UnitKind::Target;
-    }
-    if service.name.ends_with(".automount") {
-        return UnitKind::Automount;
-    }
-    if service.name.ends_with(".slice") {
-        return UnitKind::Slice;
-    }
-    if service.name.ends_with(".device") {
-        return UnitKind::Device;
-    }
-    match service.service_type {
-        ServiceType::Socket => UnitKind::Socket,
-        ServiceType::Timer => UnitKind::Timer,
-        ServiceType::Path => UnitKind::Path,
-        ServiceType::Mount => UnitKind::Mount,
-        ServiceType::Swap => UnitKind::Swap,
-        ServiceType::Simple
-        | ServiceType::Forking
-        | ServiceType::Oneshot
-        | ServiceType::Notify
-        | ServiceType::Dbus
-        | ServiceType::Idle => {
-            if service.name.ends_with(".service") || !service.name.contains('.') {
-                UnitKind::Service
-            } else {
-                UnitKind::Other
-            }
-        }
-    }
-}
-
-fn insert_if_loaded(
-    services: &BTreeMap<String, ServiceSpec>,
-    dependencies: &mut BTreeSet<String>,
-    name: &str,
-) {
-    if services.contains_key(name) {
-        dependencies.insert(name.to_owned());
     }
 }
 
@@ -791,44 +633,35 @@ mod tests {
     }
 
     #[test]
-    fn default_service_dependencies_pull_in_loaded_sysinit_and_shutdown_ordering() {
+    fn native_graph_does_not_inject_implicit_manager_services() {
         let mut graph = DependencyGraph::default();
         graph
-            .add(service("shutdown.target"))
-            .expect("shutdown target");
-        graph
-            .add(service("sysinit.target"))
-            .expect("sysinit target");
-        graph.add(service("basic.target")).expect("basic target");
-        graph.add(service("worker.service")).expect("worker");
+            .add(service("shutdown.profile"))
+            .expect("shutdown profile");
+        graph.add(service("boot.profile")).expect("boot profile");
+        graph.add(service("worker.svc")).expect("worker");
 
         assert_eq!(
-            graph.plan_start("worker.service").expect("start plan"),
-            vec!["sysinit.target".to_owned(), "worker.service".to_owned(),]
+            graph.plan_start("worker.svc").expect("start plan"),
+            vec!["worker.svc".to_owned()]
         );
-        assert!(
-            graph
-                .conflict_dependencies("worker.service")
-                .contains("shutdown.target")
-        );
+        assert!(graph.conflict_dependencies("worker.svc").is_empty());
     }
 
     #[test]
     fn default_dependencies_no_disables_synthesized_edges() {
         let mut graph = DependencyGraph::default();
+        graph.add(service("boot.profile")).expect("boot profile");
         graph
-            .add(service("sysinit.target"))
-            .expect("sysinit target");
-        graph
-            .add(service("shutdown.target"))
-            .expect("shutdown target");
-        let mut worker = service("early.service");
+            .add(service("shutdown.profile"))
+            .expect("shutdown profile");
+        let mut worker = service("early.svc");
         worker.default_dependencies = false;
         graph.add(worker).expect("early service");
 
         assert_eq!(
-            graph.required_closure("early.service").expect("closure"),
-            ["early.service".to_owned()].into()
+            graph.required_closure("early.svc").expect("closure"),
+            ["early.svc".to_owned()].into()
         );
         assert!(
             !graph

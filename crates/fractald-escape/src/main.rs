@@ -6,7 +6,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("systemd-escape: {error}");
+            eprintln!("fractald-escape: {error}");
             ExitCode::from(1)
         }
     }
@@ -59,7 +59,7 @@ fn parse_args() -> Result<(Options, Vec<String>), String> {
                 return Ok((options, Vec::new()));
             }
             "--version" => {
-                println!("systemd-escape (FractalD) 0.1.0");
+                println!("fractald-escape (FractalD) 0.1.0");
                 options.exit = true;
                 return Ok((options, Vec::new()));
             }
@@ -232,7 +232,7 @@ fn template_instance(template: &str, instance: &str) -> String {
 
 fn print_help() {
     println!(
-        "systemd-escape (FractalD)\n\nusage: systemd-escape [OPTIONS] [NAME...]\n\n  -u, --unescape       decode escaped names\n  -m, --mangle         replace path separators without escaping\n  -p, --path           treat names as paths\n      --instance       print only the instance when unescaping\n      --suffix=SUFFIX   append a unit suffix\n      --template=NAME   insert each name into a template"
+        "fractald-escape (FractalD)\n\nusage: fractald-escape [OPTIONS] [NAME...]\n\n  -u, --unescape       decode escaped names\n  -m, --mangle         replace path separators without escaping\n  -p, --path           treat names as paths\n      --instance       print only the instance when unescaping\n      --suffix=SUFFIX   append a unit suffix\n      --template=NAME   insert each name into a template"
     );
 }
 
@@ -249,12 +249,12 @@ mod tests {
     #[test]
     fn applies_templates_and_suffixes() {
         let options = Options {
-            template: Some("worker@.service".to_owned()),
+            template: Some("worker@.svc".to_owned()),
             ..Options::default()
         };
         assert_eq!(
             transform("alpha", &options).expect("template"),
-            "worker@alpha.service"
+            "worker@alpha.svc"
         );
     }
 
@@ -265,6 +265,6 @@ mod tests {
             path_unescape(r"var-lib-foo\x2dbar").expect("escaped path"),
             "/var/lib/foo-bar"
         );
-        assert_eq!(instance_part("worker@alpha.service"), "alpha");
+        assert_eq!(instance_part("worker@alpha.svc"), "alpha");
     }
 }

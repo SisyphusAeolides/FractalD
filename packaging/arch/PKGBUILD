@@ -1,0 +1,24 @@
+pkgname=fractald
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Standalone native PID1 and Linux service supervisor'
+arch=(x86_64)
+url='https://github.com/SisyphusAeolides/FractalD'
+license=(GPL-2.0-or-later)
+install=fractald.install
+depends=(glibc)
+makedepends=(base-devel git rust clang)
+source=("$pkgname::git+$url.git#branch=main")
+sha256sums=('SKIP')
+
+build() {
+    cd "$srcdir/$pkgname"
+    make PREFIX=/usr BINDIR=/usr/bin LIBEXECDIR=/usr/lib \
+        SERVICE_DIR=/usr/lib/fractald/services
+}
+
+package() {
+    cd "$srcdir/$pkgname"
+    make DESTDIR="$pkgdir" PREFIX=/usr BINDIR=/usr/bin LIBEXECDIR=/usr/lib \
+        SERVICE_DIR=/usr/lib/fractald/services install
+}

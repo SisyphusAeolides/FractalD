@@ -131,6 +131,7 @@ impl StatePaths {
     pub fn enable(&self, name: &str) -> io::Result<()> {
         validate_service_name(name)?;
         self.ensure_directory()?;
+        let name = native_service_name(name);
         let path = self.enabled.join(name);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
@@ -209,6 +210,7 @@ impl StatePaths {
     pub fn mask(&self, name: &str) -> io::Result<()> {
         validate_service_name(name)?;
         self.ensure_directory()?;
+        let name = native_service_name(name);
         let path = self.masked.join(name);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
@@ -262,54 +264,16 @@ impl StatePaths {
     }
 }
 
-pub fn unit_file_directories() -> Vec<PathBuf> {
+pub fn service_directories() -> Vec<PathBuf> {
     if let Some(path) = env::var_os("FRACTALD_SERVICE_DIR") {
-        if env::var_os("FRACTALD_GENERATOR_DIR").is_some() {
-            let generated = env::var_os("FRACTALD_GENERATED_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| RuntimePaths::from_environment().directory.join("generator"));
-            let generated_parent = generated
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_owned();
-            let generated_name = generated
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("generator")
-                .to_owned();
-            return vec![
-                generated_parent.join(format!("{generated_name}.late")),
-                PathBuf::from(path),
-                generated,
-                generated_parent.join(format!("{generated_name}.early")),
-            ];
-        }
         return vec![PathBuf::from(path)];
     }
-    let generated = env::var_os("FRACTALD_GENERATED_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| RuntimePaths::from_environment().directory.join("generator"));
-    let generated_parent = generated
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_owned();
-    let generated_name = generated
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("generator");
-    let generated_early = generated_parent.join(format!("{generated_name}.early"));
-    let generated_late = generated_parent.join(format!("{generated_name}.late"));
     if fractald_platform::is_root() {
         vec![
-            generated_late,
-            PathBuf::from("/usr/lib/systemd/system"),
-            PathBuf::from("/usr/local/lib/systemd/system"),
-            PathBuf::from("/lib/systemd/system"),
-            PathBuf::from("/run/systemd/system"),
-            generated,
-            PathBuf::from("/etc/systemd/system"),
+            PathBuf::from("/usr/lib/fractald/services"),
+            PathBuf::from("/usr/local/lib/fractald/services"),
+            PathBuf::from("/run/fractald/services"),
             PathBuf::from("/etc/fractald/services"),
-            generated_early,
         ]
     } else {
         let config_home = env::var_os("XDG_CONFIG_HOME")
@@ -318,65 +282,36 @@ pub fn unit_file_directories() -> Vec<PathBuf> {
         let runtime = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(format!("/run/user/{}", fractald_platform::effective_uid()))
+                PathBuf::from(format!(
+                    "/tmp/fractald-runtime-{}",
+                    fractald_platform::effective_uid()
+                ))
             });
-        let mut directories = vec![
-            generated_late,
-            PathBuf::from("/usr/lib/systemd/user"),
-            PathBuf::from("/usr/local/lib/systemd/user"),
-            runtime.join("systemd/user"),
-            generated,
-        ];
+        let mut directories = Vec::new();
         if let Some(config_home) = config_home {
-            directories.push(config_home.join("systemd/user"));
             directories.push(config_home.join("fractald/services"));
         }
-        directories.push(generated_early);
+        directories.push(runtime.join("fractald/services"));
         directories
     }
 }
 
-pub fn unit_file_is_enabled(directories: &[PathBuf], name: &str) -> io::Result<bool> {
-    validate_service_name(name)?;
+pub fn service_is_enabled(directories: &[PathBuf], name: &str) -> io::Result<bool> {
+    let name = native_service_name(name);
+    validate_service_name(&name)?;
     for directory in directories {
-        let entries = match fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+        let path = directory.join(format!("{name}.enabled"));
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => return Ok(true),
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let relationship = entry.file_name();
-            let Some(relationship) = relationship.to_str() else {
-                continue;
-            };
-            if !(relationship.ends_with(".wants") || relationship.ends_with(".requires")) {
-                continue;
-            }
-            let relationship_path = entry.path();
-            if !fs::metadata(&relationship_path).is_ok_and(|metadata| metadata.is_dir()) {
-                continue;
-            }
-            for candidate in service_name_candidates(name) {
-                let path = relationship_path.join(&candidate);
-                match fs::symlink_metadata(&path) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => {
-                        let target = fs::read_link(&path)?;
-                        if target != Path::new("/dev/null") {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
         }
     }
     Ok(false)
 }
 
-pub fn unit_file_enabled_names(directories: &[PathBuf]) -> io::Result<Vec<String>> {
+pub fn service_enabled_names(directories: &[PathBuf]) -> io::Result<Vec<String>> {
     let mut names = std::collections::BTreeSet::new();
     for directory in directories {
         let entries = match fs::read_dir(directory) {
@@ -386,33 +321,14 @@ pub fn unit_file_enabled_names(directories: &[PathBuf]) -> io::Result<Vec<String
         };
         for entry in entries {
             let entry = entry?;
-            let relationship = entry.file_name();
-            let Some(relationship) = relationship.to_str() else {
+            let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            if !(relationship.ends_with(".wants") || relationship.ends_with(".requires")) {
+            let Some(name) = file_name.strip_suffix(".enabled") else {
                 continue;
-            }
-            let relationship_path = entry.path();
-            if !fs::metadata(&relationship_path).is_ok_and(|metadata| metadata.is_dir()) {
-                continue;
-            }
-            for child in fs::read_dir(&relationship_path)? {
-                let child = child?;
-                let name = child.file_name();
-                let Some(name) = name.to_str() else {
-                    continue;
-                };
-                if validate_service_name(name).is_err() {
-                    continue;
-                }
-                let metadata = fs::symlink_metadata(child.path())?;
-                if !metadata.file_type().is_symlink() {
-                    continue;
-                }
-                if fs::read_link(child.path())? == Path::new("/dev/null") {
-                    continue;
-                }
+            };
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if validate_service_name(name).is_ok() && metadata.file_type().is_file() {
                 names.insert(name.to_owned());
             }
         }
@@ -420,32 +336,16 @@ pub fn unit_file_enabled_names(directories: &[PathBuf]) -> io::Result<Vec<String
     Ok(names.into_iter().collect())
 }
 
-pub fn unit_file_is_masked(directories: &[PathBuf], name: &str) -> io::Result<bool> {
-    validate_service_name(name)?;
+pub fn service_is_masked(directories: &[PathBuf], name: &str) -> io::Result<bool> {
+    let name = native_service_name(name);
+    validate_service_name(&name)?;
     for directory in directories.iter().rev() {
-        for candidate in service_name_candidates(name) {
-            let path = directory.join(candidate);
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let target = fs::read_link(&path)?;
-                    if target == Path::new("/dev/null") {
-                        return Ok(true);
-                    }
-                    let resolved = if target.is_absolute() {
-                        target
-                    } else {
-                        path.parent().unwrap_or_else(|| Path::new(".")).join(target)
-                    };
-                    return match fs::canonicalize(&resolved) {
-                        Ok(resolved) => Ok(resolved == Path::new("/dev/null")),
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-                        Err(error) => Err(error),
-                    };
-                }
-                Ok(_) => return Ok(false),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
+        let path = directory.join(format!("{name}.masked"));
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => return Ok(true),
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(false)
@@ -468,16 +368,12 @@ fn validate_service_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn native_service_name(name: &str) -> String {
+    name.strip_suffix(".svc").unwrap_or(name).to_owned()
+}
+
 fn service_name_candidates(name: &str) -> Vec<String> {
-    let mut candidates = vec![name.to_owned()];
-    if let Some(base) = name.strip_suffix(".service") {
-        if !base.is_empty() {
-            candidates.push(base.to_owned());
-        }
-    } else {
-        candidates.push(format!("{name}.service"));
-    }
-    candidates
+    vec![native_service_name(name)]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,8 +410,8 @@ mod service_name_tests {
     use super::validate_service_name;
 
     #[test]
-    fn accepts_systemd_escaped_unit_names() {
-        assert!(validate_service_name(r"run-vmblock\x2dfuse.mount").is_ok());
+    fn accepts_native_service_names() {
+        assert!(validate_service_name("network-online").is_ok());
     }
 }
 
@@ -994,13 +890,13 @@ mod tests {
     #[test]
     fn service_requests_round_trip() {
         let requests = [
-            Request::StartService("web.service".to_owned()),
-            Request::IsolateService("multi-user.target".to_owned()),
-            Request::StopService("web.service".to_owned()),
-            Request::RestartService("web.service".to_owned()),
+            Request::StartService("web.svc".to_owned()),
+            Request::IsolateService("boot.profile".to_owned()),
+            Request::StopService("web.svc".to_owned()),
+            Request::RestartService("web.svc".to_owned()),
             Request::ResetFailed(None),
-            Request::ResetFailed(Some("web.service".to_owned())),
-            Request::ServiceStatus("web.service".to_owned()),
+            Request::ResetFailed(Some("web.svc".to_owned())),
+            Request::ServiceStatus("web.svc".to_owned()),
             Request::TransactionStatus(41),
             Request::Subscribe(None),
             Request::Subscribe(Some(0)),
@@ -1026,7 +922,7 @@ mod tests {
         let response = Response::Accepted {
             id: 41,
             operation: "start".to_owned(),
-            name: "web.service".to_owned(),
+            name: "web.svc".to_owned(),
         };
         assert_eq!(Response::parse(&response.as_line()), Ok(response));
     }
@@ -1036,7 +932,7 @@ mod tests {
         let response = Response::Transaction(TransactionStatus {
             id: 41,
             operation: "start".to_owned(),
-            name: "web.service".to_owned(),
+            name: "web.svc".to_owned(),
             state: "pending".to_owned(),
         });
         assert_eq!(Response::parse(&response.as_line()), Ok(response));
@@ -1049,7 +945,7 @@ mod tests {
             Ok(Response::Subscribed)
         );
         let response = Response::Event {
-            line: "seq=4 service=web.service state=running".to_owned(),
+            line: "seq=4 service=web.svc state=running".to_owned(),
         };
         assert_eq!(Response::parse(&response.as_line()), Ok(response));
     }
@@ -1057,7 +953,7 @@ mod tests {
     #[test]
     fn service_status_round_trips_without_a_pid() {
         let response = Response::Service(ServiceStatus {
-            name: "web.service".to_owned(),
+            name: "web.svc".to_owned(),
             state: "defined".to_owned(),
             pid: None,
             generation: 2,
@@ -1075,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn service_enablement_accepts_the_service_suffix() {
+    fn service_enablement_accepts_the_native_suffix() {
         let directory = PathBuf::from(format!("/tmp/fractald-state-test-{}", std::process::id()));
         let paths = StatePaths {
             enabled: directory.join("enabled"),
@@ -1084,16 +980,12 @@ mod tests {
             directory,
         };
         paths.enable("demo").expect("enable service");
-        assert!(paths.is_enabled("demo.service").expect("inspect service"));
-        paths.disable("demo.service").expect("disable service");
+        assert!(paths.is_enabled("demo.svc").expect("inspect service"));
+        paths.disable("demo.svc").expect("disable service");
         assert!(!paths.is_enabled("demo").expect("inspect disabled service"));
         paths.mask("demo").expect("mask service");
-        assert!(
-            paths
-                .is_masked("demo.service")
-                .expect("inspect masked service")
-        );
-        paths.unmask("demo.service").expect("unmask service");
+        assert!(paths.is_masked("demo.svc").expect("inspect masked service"));
+        paths.unmask("demo.svc").expect("unmask service");
         assert!(!paths.is_masked("demo").expect("inspect unmasked service"));
         let _ = fs::remove_dir_all(paths.directory);
     }

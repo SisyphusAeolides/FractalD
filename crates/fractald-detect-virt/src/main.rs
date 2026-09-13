@@ -18,7 +18,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("systemd-detect-virt: {error}");
+            eprintln!("fractald-detect-virt: {error}");
             ExitCode::from(1)
         }
     }
@@ -38,7 +38,7 @@ fn run() -> Result<u8, String> {
             }
             "--version" => {
                 println!(
-                    "systemd-detect-virt (FractalD) {}",
+                    "fractald-detect-virt (FractalD) {}",
                     env!("CARGO_PKG_VERSION")
                 );
                 return Ok(0);
@@ -120,7 +120,7 @@ fn detect_container() -> Option<String> {
             return Some(value);
         }
     }
-    for path in ["/run/systemd/container", "/run/oci/container"] {
+    for path in ["/run/fractald/container", "/run/oci/container"] {
         if let Ok(value) = fs::read_to_string(path) {
             let value = value.trim();
             if !value.is_empty() {
@@ -250,7 +250,7 @@ fn known_virtualization_types() -> [&'static str; 13] {
 
 fn print_help() {
     println!(
-        "systemd-detect-virt (FractalD)\n\nUsage: systemd-detect-virt [OPTIONS]\n\n  --container, -c    detect containers only\n  --vm, -v           detect virtual machines only\n  --chroot, -r       detect chroot execution\n  --private-users     detect a private user namespace\n  --cvm              detect confidential virtual machines\n  --quiet, -q         suppress output\n  --list              list known virtualization types\n  --list-cvm          list confidential VM types\n  --version           show the version\n  --help              show this help"
+        "fractald-detect-virt (FractalD)\n\nUsage: fractald-detect-virt [OPTIONS]\n\n  --container, -c    detect containers only\n  --vm, -v           detect virtual machines only\n  --chroot, -r       detect chroot execution\n  --private-users     detect a private user namespace\n  --cvm              detect confidential virtual machines\n  --quiet, -q         suppress output\n  --list              list known virtualization types\n  --list-cvm          list confidential VM types\n  --version           show the version\n  --help              show this help"
     );
 }
 

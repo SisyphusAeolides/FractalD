@@ -51,7 +51,7 @@ fn main() -> ExitCode {
     match run(env::args_os().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("systemd-tmpfiles: {error}");
+            eprintln!("fractald-tmpfiles: {error}");
             ExitCode::from(1)
         }
     }
@@ -64,7 +64,7 @@ fn run(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(), String>
         return Ok(());
     }
     if options.show_version {
-        println!("systemd-tmpfiles (FractalD) {}", env!("CARGO_PKG_VERSION"));
+        println!("fractald-tmpfiles (FractalD) {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if options.action.is_none() {
@@ -824,7 +824,7 @@ fn io_message(error: io::Error) -> String {
 
 fn print_help() {
     println!(
-        "systemd-tmpfiles (FractalD)\n\nUsage: systemd-tmpfiles COMMAND [OPTIONS] [CONFIGURATION FILE...]\n\n  --create              create and adjust files and directories\n  --clean               clean entries older than their configured age\n  --remove              remove entries marked for removal\n  --purge               remove entries from the supplied configuration\n  --cat-config          print effective configuration\n  --tldr                print non-comment configuration\n  --root=PATH           operate below an alternate filesystem root\n  --prefix=PATH         select rules below a path\n  --exclude-prefix=PATH exclude rules below a path\n  --boot                include boot-only rules\n  --graceful            ignore unknown owners\n  --dry-run             print operations without changing files"
+        "fractald-tmpfiles (FractalD)\n\nUsage: fractald-tmpfiles COMMAND [OPTIONS] [CONFIGURATION FILE...]\n\n  --create              create and adjust files and directories\n  --clean               clean entries older than their configured age\n  --remove              remove entries marked for removal\n  --purge               remove entries from the supplied configuration\n  --cat-config          print effective configuration\n  --tldr                print non-comment configuration\n  --root=PATH           operate below an alternate filesystem root\n  --prefix=PATH         select rules below a path\n  --exclude-prefix=PATH exclude rules below a path\n  --boot                include boot-only rules\n  --graceful            ignore unknown owners\n  --dry-run             print operations without changing files"
     );
 }
 

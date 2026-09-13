@@ -1,4 +1,0 @@
-[Unit]
-Description=FractalD direct PID1 validation target
-Wants=pid1-network.service pid1-sshd.service pid1-ready.service pid1-dynamic.service pid1-cpu-quota.service pid1-device-policy.service pid1-private-users.service
-After=pid1-network.service pid1-sshd.service pid1-ready.service pid1-dynamic.service pid1-cpu-quota.service pid1-device-policy.service pid1-private-users.service

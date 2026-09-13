@@ -110,6 +110,7 @@ unsafe extern "C" {
     fn fractald_install_shutdown_handlers() -> i32;
     fn fractald_shutdown_requested() -> i32;
     fn fractald_power_action(action: i32) -> i32;
+    fn fractald_prepare_pid1_mounts() -> i32;
     fn fractald_set_child_subreaper() -> i32;
     fn fractald_reap_untracked_children(managed_pids: *const u32, managed_count: usize) -> i32;
 }
@@ -275,6 +276,15 @@ pub fn accept_fd(fd: RawFd) -> io::Result<RawFd> {
 
 pub fn set_activation_stdin() -> io::Result<()> {
     let result = unsafe { fractald_set_activation_stdin() };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn prepare_pid1_mounts() -> io::Result<()> {
+    let result = unsafe { fractald_prepare_pid1_mounts() };
     if result < 0 {
         Err(io::Error::last_os_error())
     } else {

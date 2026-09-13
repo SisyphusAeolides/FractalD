@@ -6,7 +6,6 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -19,13 +18,13 @@ use fractald_chaos::{
 };
 use fractald_control::{
     Request, Response, RuntimePaths, ShutdownAction, StatePaths, TransactionStatus,
-    remove_stale_socket, unit_file_directories, unit_file_enabled_names,
+    remove_stale_socket,
 };
 use fractald_core::{
     Event, ExitReason, ManagerAction, SIGKILL, ServiceRecord, ServiceSpec, ServiceState,
 };
 use fractald_platform::{ExitKind, PidFd};
-use fractald_storage::{STORAGE_TARGET_UNIT, generate_units, parse_crypttab, parse_fstab};
+use fractald_storage::{generate_services, parse_crypttab, parse_fstab};
 use fractald_supervisor::{ServiceSnapshot, Supervisor};
 
 fn main() -> ExitCode {
@@ -59,31 +58,35 @@ fn run() -> Result<u8, String> {
         }
         Some("self-check") => self_check(),
         Some("chaos") => run_chaos(args),
-        Some("daemon") => run_daemon(),
+        Some("daemon") | Some("--pid1") => run_daemon(),
         Some("storage-prepare") => storage_prepare(),
-        Some("inspect-unit") => inspect_unit(args),
+        Some("inspect-service") => inspect_service(args),
         Some("run") => run_command(args),
         _ => Err(usage()),
     }
 }
 
-fn inspect_unit(mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
+fn inspect_service(mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let path = args
         .next()
         .map(PathBuf::from)
-        .ok_or_else(|| "inspect-unit requires a unit file path".to_owned())?;
+        .ok_or_else(|| "inspect-service requires a service file path".to_owned())?;
     if args.next().is_some() {
-        return Err("inspect-unit accepts one unit file path".to_owned());
+        return Err("inspect-service accepts one service file path".to_owned());
     }
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| format!("unit path has no valid file name: {}", path.display()))?;
-    let unit = fractald_config::UnitFile::parse(&source)
-        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
-    let spec = parse_loaded_unit(unit, name, &[])
+        .ok_or_else(|| format!("service path has no valid file name: {}", path.display()))?;
+    let name = name.strip_suffix(".svc").ok_or_else(|| {
+        format!(
+            "service file does not use the .svc suffix: {}",
+            path.display()
+        )
+    })?;
+    let spec = fractald_config::parse_service(&source, name)
         .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
     println!("name={}", spec.name);
     println!("program={}", spec.program.display());
@@ -234,6 +237,8 @@ fn sample_chaos(kind: SystemKind) {
 fn run_daemon() -> Result<u8, String> {
     let pid1 = std::process::id() == 1;
     if pid1 {
+        fractald_platform::prepare_pid1_mounts()
+            .map_err(|error| format!("cannot prepare PID1 mount topology: {error}"))?;
         fractald_platform::set_child_subreaper()
             .map_err(|error| format!("cannot initialize PID1 child reaping: {error}"))?;
     }
@@ -250,10 +255,12 @@ fn run_daemon() -> Result<u8, String> {
     }
     let mut journal = EventJournal::open(&state)?;
     let _ = journal.observe(&supervisor)?;
-    start_boot_target(&mut supervisor);
-    start_storage_target(&mut supervisor);
+    start_storage_profile(&mut supervisor);
+    let boot_profile = start_boot_profile(&mut supervisor, pid1);
+    if let Some(profile) = boot_profile.as_deref() {
+        start_profile_services(&mut supervisor, profile);
+    }
     start_enabled(&mut supervisor, &state)?;
-    start_openrc_runlevel(&mut supervisor);
     let _ = journal.observe(&supervisor)?;
     paths.ensure_directory().map_err(|error| {
         format!(
@@ -285,29 +292,66 @@ fn run_daemon() -> Result<u8, String> {
     result.map(|_| 0)
 }
 
-fn start_boot_target(supervisor: &mut Supervisor) {
-    let Some(target) = env::var_os("FRACTALD_BOOT_TARGET").filter(|value| !value.is_empty()) else {
-        return;
-    };
-    let target = target.to_string_lossy();
-    let name = match ensure_service_loaded(supervisor, &target) {
+fn start_boot_profile(supervisor: &mut Supervisor, pid1: bool) -> Option<String> {
+    let profile = configured_boot_profile().or_else(|| pid1.then(|| "boot".to_owned()));
+    let profile = profile?;
+    let name = match ensure_service_loaded(supervisor, &profile) {
         Ok(name) => name,
         Err(error) => {
-            eprintln!("fractald: cannot load boot target {target}: {error}");
-            return;
+            eprintln!("fractald: cannot load boot profile {profile}: {error}");
+            return Some(profile);
         }
     };
     if let Err(error) = supervisor.start(&name) {
-        eprintln!("fractald: cannot start boot target {name}: {error}");
+        eprintln!("fractald: cannot start boot profile {name}: {error}");
+    }
+    Some(profile)
+}
+
+fn configured_boot_profile() -> Option<String> {
+    if let Some(profile) = env::var("FRACTALD_BOOT_PROFILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(profile);
+    }
+    let path = env::var_os("FRACTALD_BOOT_PROFILE_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/etc/fractald/boot.conf"));
+    let source = fs::read_to_string(path).ok()?;
+    source.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "profile" && !value.trim().is_empty()).then(|| value.trim().to_owned())
+    })
+}
+
+fn start_storage_profile(supervisor: &mut Supervisor) {
+    let Some(name) = supervisor.resolve_name("storage").map(str::to_owned) else {
+        return;
+    };
+    if let Err(error) = supervisor.start(&name) {
+        eprintln!("fractald: cannot start storage profile {name}: {error}");
     }
 }
 
-fn start_storage_target(supervisor: &mut Supervisor) {
-    if supervisor.resolve_name(STORAGE_TARGET_UNIT).is_none() {
-        return;
-    }
-    if let Err(error) = supervisor.start(STORAGE_TARGET_UNIT) {
-        eprintln!("fractald: cannot start storage target: {error}");
+fn start_profile_services(supervisor: &mut Supervisor, profile: &str) {
+    let names = supervisor
+        .names()
+        .filter(|name| {
+            supervisor
+                .specification(name)
+                .is_some_and(|spec| spec.profiles.contains(profile))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for name in names {
+        if let Err(error) = supervisor.start(&name) {
+            eprintln!("fractald: cannot start {profile} profile service {name}: {error}");
+        }
     }
 }
 
@@ -513,11 +557,6 @@ fn start_enabled(supervisor: &mut Supervisor, state: &StatePaths) -> Result<(), 
     let mut names = state
         .enabled_names()
         .map_err(|error| format!("cannot read enabled services: {error}"))?;
-    names.extend(
-        unit_file_enabled_names(&unit_file_directories())
-            .map_err(|error| format!("cannot read standard unit enablement: {error}"))?,
-    );
-    names.retain(|name| name != "fractald.service");
     names.sort();
     names.dedup();
     for requested_name in names {
@@ -535,39 +574,80 @@ fn start_enabled(supervisor: &mut Supervisor, state: &StatePaths) -> Result<(), 
     Ok(())
 }
 
-fn start_openrc_runlevel(supervisor: &mut Supervisor) {
-    let Some(runlevel) = env::var_os("FRACTALD_OPENRC_RUNLEVEL") else {
-        return;
-    };
-    let directory = env::var_os("FRACTALD_OPENRC_RUNLEVEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/etc/runlevels"))
-        .join(runlevel);
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-        Err(error) => {
-            eprintln!(
-                "fractald: cannot read OpenRC runlevel {}: {error}",
-                directory.display()
-            );
-            return;
-        }
-    };
-    let mut names = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    names.sort();
-    for name in names {
-        let Some(service_name) = supervisor.resolve_name(&name).map(str::to_owned) else {
-            eprintln!("fractald: OpenRC runlevel service {name} has no definition");
-            continue;
+fn reload_native_configuration(
+    supervisor: &mut Supervisor,
+    state: &StatePaths,
+) -> Result<(), String> {
+    let specs = load_all_service_specs()?;
+    let incoming = specs
+        .iter()
+        .map(|spec| (spec.name.clone(), spec))
+        .collect::<BTreeMap<_, _>>();
+    let existing = supervisor.names().map(str::to_owned).collect::<Vec<_>>();
+    let mut stopping = BTreeSet::new();
+    let mut restart = BTreeSet::new();
+
+    for name in existing {
+        let changed = match incoming.get(&name) {
+            Some(next) => supervisor
+                .specification(&name)
+                .is_some_and(|current| *next != current),
+            None => true,
         };
-        if let Err(error) = supervisor.start(&service_name) {
-            eprintln!("fractald: cannot start OpenRC runlevel service {service_name}: {error}");
+        if !changed || supervisor.service_is_stopped(&name) != Some(false) {
+            continue;
+        }
+        if incoming.contains_key(&name) {
+            restart.insert(name.clone());
+        }
+        stopping.insert(name);
+    }
+
+    for name in &stopping {
+        supervisor
+            .stop_for_reconfigure(name)
+            .map_err(|error| format!("cannot stop {name} for reload: {error}"))?;
+    }
+    wait_for_reconfigure(supervisor, &stopping)?;
+    supervisor
+        .reload(specs)
+        .map_err(|error| format!("cannot reload native services: {error}"))?;
+
+    let pid1 = std::process::id() == 1;
+    start_storage_profile(supervisor);
+    let boot_profile = start_boot_profile(supervisor, pid1);
+    if let Some(profile) = boot_profile.as_deref() {
+        start_profile_services(supervisor, profile);
+    }
+    start_enabled(supervisor, state)?;
+    for name in restart {
+        if let Some(name) = supervisor.resolve_name(&name).map(str::to_owned) {
+            supervisor
+                .start(&name)
+                .map_err(|error| format!("cannot restart reloaded service {name}: {error}"))?;
         }
     }
+    Ok(())
+}
+
+fn wait_for_reconfigure(
+    supervisor: &mut Supervisor,
+    names: &BTreeSet<String>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while names
+        .iter()
+        .any(|name| supervisor.service_is_stopped(name) == Some(false))
+    {
+        supervisor
+            .poll()
+            .map_err(|error| format!("service stop during reload failed: {error}"))?;
+        if Instant::now() >= deadline {
+            return Err("services did not stop within 10 seconds for reload".to_owned());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn load_services() -> Result<Supervisor, String> {
@@ -581,9 +661,8 @@ fn load_services() -> Result<Supervisor, String> {
 }
 
 fn load_all_service_specs() -> Result<Vec<ServiceSpec>, String> {
-    prepare_generated_units()?;
+    prepare_native_storage_services()?;
     let mut specs = load_service_specs()?;
-    specs.extend(load_openrc_specs()?);
     append_synthetic_device_specs(&mut specs)?;
     Ok(specs)
 }
@@ -595,7 +674,7 @@ fn append_synthetic_device_specs(specs: &mut Vec<ServiceSpec>) -> Result<(), Str
         .collect::<BTreeSet<_>>();
     let mut index = 0;
     while index < specs.len() {
-        let dependencies = synthetic_device_dependencies(&specs[index], &known);
+        let dependencies = native_device_dependencies(&specs[index], &known);
         for dependency in dependencies {
             if let Some(device) = load_named_service_spec(&dependency)? {
                 known.insert(device.name.clone());
@@ -607,7 +686,7 @@ fn append_synthetic_device_specs(specs: &mut Vec<ServiceSpec>) -> Result<(), Str
     Ok(())
 }
 
-fn synthetic_device_dependencies(spec: &ServiceSpec, known: &BTreeSet<String>) -> BTreeSet<String> {
+fn native_device_dependencies(spec: &ServiceSpec, known: &BTreeSet<String>) -> BTreeSet<String> {
     [
         &spec.dependencies.requires,
         &spec.dependencies.wants,
@@ -622,27 +701,25 @@ fn synthetic_device_dependencies(spec: &ServiceSpec, known: &BTreeSet<String>) -
     ]
     .into_iter()
     .flat_map(|set| set.iter())
-    .filter(|name| name.ends_with(".device") && !known.contains(*name))
+    .filter(|name| name.starts_with("device-") && !known.contains(*name))
     .cloned()
     .collect()
 }
 
 fn ensure_service_loaded(supervisor: &mut Supervisor, requested: &str) -> Result<String, String> {
-    let directories = service_directories();
-    let requested =
-        canonical_unit_name(&directories, requested)?.unwrap_or_else(|| requested.to_owned());
+    let requested = native_service_name(requested);
     let requested = supervisor
-        .resolve_name(&requested)
+        .resolve_name(requested)
         .map(str::to_owned)
-        .unwrap_or_else(|| normalize_service_name(&requested));
-    let masked = StatePaths::from_environment()
+        .unwrap_or_else(|| requested.to_owned());
+    let state = StatePaths::from_environment();
+    if state
         .is_masked(&requested)
-        .map_err(|error| format!("cannot inspect masked state for {requested}: {error}"))?;
-    if masked || unit_path_is_masked(&directories, &requested)? {
-        return Err(format!("unit {requested} is masked"));
+        .map_err(|error| format!("cannot inspect masked state for {requested}: {error}"))?
+    {
+        return Err(format!("service {requested} is masked"));
     }
-    let mut loading = BTreeSet::new();
-    ensure_service_loaded_inner(supervisor, &requested, &mut loading)
+    ensure_service_loaded_inner(supervisor, &requested, &mut BTreeSet::new())
 }
 
 fn ensure_service_loaded_inner(
@@ -665,650 +742,186 @@ fn ensure_service_loaded_inner(
     };
     if !loading.insert(name.clone()) {
         return Ok(name);
-    };
+    }
     let trigger_target = spec.trigger.as_ref().map(|trigger| match trigger {
         fractald_core::TriggerSpec::Timer { service, .. }
         | fractald_core::TriggerSpec::Path { service, .. } => service.clone(),
     });
-    let mut dependencies = spec
-        .dependencies
-        .requires
-        .iter()
-        .chain(spec.dependencies.wants.iter())
-        .chain(spec.dependencies.binds_to.iter())
-        .chain(spec.dependencies.requisite.iter())
-        .cloned()
-        .collect::<Vec<_>>();
-    dependencies.extend(mount_unit_candidates(&spec)?);
+    let mut dependencies = BTreeSet::new();
+    dependencies.extend(spec.dependencies.requires.iter().cloned());
+    dependencies.extend(spec.dependencies.wants.iter().cloned());
+    dependencies.extend(spec.dependencies.after.iter().cloned());
+    dependencies.extend(spec.dependencies.before.iter().cloned());
+    dependencies.extend(spec.dependencies.conflicts.iter().cloned());
+    dependencies.extend(spec.dependencies.part_of.iter().cloned());
+    dependencies.extend(spec.dependencies.binds_to.iter().cloned());
+    dependencies.extend(spec.dependencies.requisite.iter().cloned());
+    dependencies.extend(spec.dependencies.on_success.iter().cloned());
+    dependencies.extend(spec.dependencies.on_failure.iter().cloned());
     if supervisor.resolve_name(&name).is_none() {
         supervisor
             .add(spec)
             .map_err(|error| format!("cannot load service {name}: {error}"))?;
     }
     for dependency in dependencies {
+        let dependency = native_service_name(&dependency);
         if supervisor.resolve_name(&dependency).is_some() {
             continue;
         }
-        if load_named_service_spec(&normalize_service_name(&dependency))?.is_some() {
-            ensure_service_loaded_inner(supervisor, &normalize_service_name(&dependency), loading)?;
+        if load_named_service_spec(&dependency)?.is_some() {
+            ensure_service_loaded_inner(supervisor, &dependency, loading)?;
         }
     }
     if let Some(target) = trigger_target {
-        if supervisor.resolve_name(&target).is_none() {
-            let target = normalize_service_name(&target);
-            if load_named_service_spec(&target)?.is_some() {
-                ensure_service_loaded_inner(supervisor, &target, loading)?;
-            }
+        let target = native_service_name(&target);
+        if supervisor.resolve_name(&target).is_none() && load_named_service_spec(&target)?.is_some()
+        {
+            ensure_service_loaded_inner(supervisor, &target, loading)?;
         }
     }
     Ok(name)
 }
 
-fn mount_unit_candidates(spec: &ServiceSpec) -> Result<Vec<String>, String> {
-    let mut candidates = BTreeSet::new();
-    let paths = spec
-        .expanded_requires_mounts_for()
-        .into_iter()
-        .chain(spec.expanded_wants_mounts_for())
-        .collect::<Vec<_>>();
-    for path in paths {
-        for candidate in mount_unit_names_for_path(&path) {
-            if load_named_service_spec(&candidate)?.is_some() {
-                candidates.insert(candidate);
-            }
-        }
-    }
-    Ok(candidates.into_iter().collect())
-}
-
-fn mount_unit_names_for_path(path: &Path) -> Vec<String> {
-    if !path.is_absolute() {
-        return Vec::new();
-    }
-    let mut prefixes = vec![PathBuf::from("/")];
-    let mut prefix = PathBuf::from("/");
-    for component in path.components() {
-        let std::path::Component::Normal(component) = component else {
-            continue;
-        };
-        prefix.push(component);
-        prefixes.push(prefix.clone());
-    }
-    prefixes
-        .into_iter()
-        .map(|prefix| format!("{}.mount", escape_mount_path(&prefix)))
-        .collect()
-}
-
-fn escape_mount_path(path: &Path) -> String {
-    if path == Path::new("/") {
-        return "-".to_owned();
-    }
-    path.components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => {
-                Some(escape_mount_component(value.as_encoded_bytes()))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("-")
-}
-
-fn escape_mount_component(value: &[u8]) -> String {
-    value
-        .iter()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':') {
-                (*byte as char).to_string()
-            } else {
-                format!("\\x{byte:02x}")
-            }
-        })
-        .collect()
-}
-
-fn normalize_service_name(name: &str) -> String {
-    if name.contains('.') {
-        name.to_owned()
-    } else {
-        format!("{name}.service")
-    }
+fn native_service_name(name: &str) -> &str {
+    name.strip_suffix(".svc").unwrap_or(name)
 }
 
 fn load_named_service_spec(name: &str) -> Result<Option<ServiceSpec>, String> {
-    let directories = service_directories();
+    let name = native_service_name(name);
     let state = StatePaths::from_environment();
     if state
         .is_masked(name)
         .map_err(|error| format!("cannot inspect masked state for {name}: {error}"))?
-        || unit_path_is_masked(&directories, name)?
     {
         return Ok(None);
     }
-    if let Some(unit) = load_unit(&directories, name)? {
-        return parse_loaded_unit(unit, name, &directories).map(Some);
-    }
-
-    if let Some(path) = device_unit_path(name) {
-        return fractald_config::UnitFile::default()
-            .to_device_spec(name.to_owned(), path)
+    if let Some(path) = find_native_service_path(name)? {
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        return fractald_config::parse_service(&source, name)
             .map(Some)
-            .map_err(|error| format!("cannot create {name}: {error}"));
+            .map_err(|error| format!("cannot parse {}: {error}", path.display()));
     }
-
-    if let Some(instance) = name.strip_suffix(".service") {
-        if let Some(at) = instance.rfind('@') {
-            let template = format!("{}@.service", &instance[..at]);
-            if let Some(unit) = load_unit(&directories, &template)? {
-                return parse_loaded_unit(unit, name, &directories).map(Some);
-            }
-        }
-    }
-
-    let Some(directory) = openrc_directory() else {
-        return Ok(None);
-    };
-    let script_name = name.strip_suffix(".service").unwrap_or(name);
-    let path = directory.join(script_name);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => {
-            let source = fs::read_to_string(&path).map_err(|error| {
-                format!("cannot read OpenRC script {}: {error}", path.display())
-            })?;
-            fractald_config::parse_openrc_script(&source, script_name, &path)
-                .map(Some)
-                .map_err(|error| format!("cannot parse OpenRC script {}: {error}", path.display()))
-        }
-        Ok(_) => Err(format!(
-            "OpenRC service path {} is not a file",
-            path.display()
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!(
-            "cannot inspect OpenRC script {}: {error}",
-            path.display()
-        )),
-    }
-}
-
-fn device_unit_path(name: &str) -> Option<PathBuf> {
-    let stem = name.strip_suffix(".device")?;
-    let encoded = stem
-        .strip_prefix("dev-")
-        .or_else(|| stem.strip_prefix("sys-"))?;
-    let prefix = if stem.starts_with("dev-") {
-        "/dev/"
-    } else {
-        "/sys/"
-    };
-    let mut path = String::from(prefix);
-    let bytes = encoded.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\'
-            && index + 3 < bytes.len()
-            && bytes[index + 1] == b'x'
-            && hex_digit(bytes[index + 2]).is_some()
-            && hex_digit(bytes[index + 3]).is_some()
-        {
-            let high = hex_digit(bytes[index + 2]).expect("checked hex digit");
-            let low = hex_digit(bytes[index + 3]).expect("checked hex digit");
-            path.push(char::from((high << 4) | low));
-            index += 4;
-        } else if bytes[index] == b'-' {
-            path.push('/');
-            index += 1;
-        } else {
-            path.push(char::from(bytes[index]));
-            index += 1;
-        }
-    }
-    Some(PathBuf::from(path))
-}
-
-fn hex_digit(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn parse_loaded_unit(
-    unit: fractald_config::UnitFile,
-    name: &str,
-    directories: &[PathBuf],
-) -> Result<ServiceSpec, String> {
-    if name.ends_with(".target") {
-        let mut spec = unit
-            .to_target_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))?;
-        augment_target_links(&mut spec, directories, name)?;
-        Ok(spec)
-    } else if name.ends_with(".socket") {
-        unit.to_socket_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".timer") {
-        unit.to_timer_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".path") {
-        unit.to_path_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".mount") {
-        unit.to_mount_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".swap") {
-        unit.to_swap_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".device") {
-        let path = device_unit_path(name)
-            .ok_or_else(|| format!("cannot derive a device path from {name}"))?;
-        unit.to_device_spec(name.to_owned(), path)
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".automount") {
-        unit.to_automount_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".slice") {
-        unit.to_slice_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else if name.ends_with(".service")
-        && !unit.has_section("Service")
-        && unit.value("Unit", "SuccessAction").is_some()
-    {
-        unit.to_action_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    } else {
-        unit.to_service_spec(name.to_owned())
-            .map_err(|error| format!("cannot parse {name}: {error}"))
-    }
-}
-
-const GENERATOR_MARKER: &str = ".fractald-generator-output";
-const DEFAULT_GENERATOR_TIMEOUT_MS: u64 = 5_000;
-
-fn prepare_generated_units() -> Result<(), String> {
-    let outputs = generated_unit_directories();
-    let directories = generator_directories();
-    let storage_enabled = storage_generation_enabled();
-
-    if directories.is_empty() && !storage_enabled {
-        for output in &outputs {
-            if generated_directory_is_owned(output) {
-                clear_generated_units(output)?;
-            }
-        }
-        return Ok(());
-    }
-
-    for output in &outputs {
-        ensure_generated_directory(output)?;
-        clear_generated_units(output)?;
-        let marker = output.join(GENERATOR_MARKER);
-        fs::write(&marker, b"FractalD generated unit directory\n").map_err(|error| {
-            format!(
-                "cannot mark generated unit directory {}: {error}",
-                marker.display()
-            )
-        })?;
-    }
-
-    if storage_enabled {
-        generate_storage_units(&outputs[0])?;
-    }
-
-    let timeout = Duration::from_millis(
-        env::var("FRACTALD_GENERATOR_TIMEOUT_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_GENERATOR_TIMEOUT_MS)
-            .clamp(100, 60_000),
-    );
-    run_generators(&directories, &outputs, timeout)
-}
-
-fn run_generators(
-    directories: &[PathBuf],
-    outputs: &[PathBuf; 3],
-    timeout: Duration,
-) -> Result<(), String> {
-    let mut seen = BTreeSet::new();
-    for directory in directories {
-        let entries = match fs::read_dir(directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                eprintln!(
-                    "fractald: cannot read generator directory {}: {error}",
-                    directory.display()
-                );
-                continue;
-            }
-        };
-        let mut paths = entries
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .collect::<Vec<_>>();
-        paths.sort();
-        for path in paths {
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            if name.starts_with('.') || !seen.insert(name.to_owned()) {
-                continue;
-            }
-            if storage_generation_enabled() && name == "systemd-fstab-generator" {
-                continue;
-            }
-            let metadata = match fs::metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    eprintln!(
-                        "fractald: cannot inspect generator {}: {error}",
-                        path.display()
-                    );
-                    continue;
-                }
-            };
-            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
-                continue;
-            }
-            if let Err(error) = run_generator(&path, outputs, timeout) {
-                eprintln!("fractald: generator {} failed: {error}", path.display());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn storage_generation_enabled() -> bool {
-    env::var_os("FRACTALD_STORAGE_FSTAB").is_some()
-        || env::var_os("FRACTALD_STORAGE_ENABLE").is_some_and(|value| {
-            matches!(
-                value.to_string_lossy().as_ref(),
-                "1" | "yes" | "true" | "on"
-            )
-        })
-        || (fractald_platform::is_root() && env::var_os("FRACTALD_SERVICE_DIR").is_none())
-}
-
-fn generate_storage_units(output: &Path) -> Result<(), String> {
-    let path = env::var_os("FRACTALD_STORAGE_FSTAB")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/etc/fstab"));
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
-    };
-    let entries = parse_fstab(&source)
-        .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
-    for unit in generate_units(&entries)
-        .map_err(|error| format!("cannot generate storage units: {error}"))?
-    {
-        let path = output.join(&unit.name);
-        fs::write(&path, unit.source)
-            .map_err(|error| format!("cannot write generated unit {}: {error}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn run_generator(path: &Path, outputs: &[PathBuf; 3], timeout: Duration) -> Result<(), String> {
-    let parent_pid = std::process::id();
-    let mut command = Command::new(path);
-    command
-        .args(outputs)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    unsafe {
-        command.pre_exec(move || {
-            fractald_platform::set_parent_death_signal(SIGKILL, parent_pid)?;
-            fractald_platform::set_process_group()?;
-            Ok(())
-        });
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("cannot execute: {error}"))?;
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(Instant::now);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => {
-                return Err(format!("exited with {status}"));
-            }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let pid = child.id();
-                let _ = fractald_platform::signal_process_group(pid, SIGKILL);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("timed out after {} ms", timeout.as_millis()));
-            }
-            Err(error) => {
-                let pid = child.id();
-                let _ = fractald_platform::signal_process_group(pid, SIGKILL);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("cannot inspect process: {error}"));
-            }
-        }
-    }
-}
-
-fn clear_generated_units(output: &Path) -> Result<(), String> {
-    let entries = match fs::read_dir(output) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "cannot read generated unit directory {}: {error}",
-                output.display()
-            ));
-        }
-    };
-    for entry in entries {
-        let path = entry
-            .map_err(|error| format!("cannot enumerate generated unit directory: {error}"))?
-            .path();
-        if path.file_name().and_then(|value| value.to_str()) == Some(GENERATOR_MARKER) {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            format!("cannot inspect generated entry {}: {error}", path.display())
-        })?;
-        if metadata.file_type().is_dir() {
-            fs::remove_dir_all(&path).map_err(|error| {
-                format!(
-                    "cannot remove generated directory {}: {error}",
-                    path.display()
-                )
-            })?;
-        } else {
-            fs::remove_file(&path).map_err(|error| {
-                format!("cannot remove generated entry {}: {error}", path.display())
-            })?;
-        }
-    }
-    Ok(())
-}
-
-fn ensure_generated_directory(output: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(output) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => {
-            return Err(format!(
-                "generated unit path {} is not a directory",
-                output.display()
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(output).map_err(|error| {
-                format!(
-                    "cannot create generated unit directory {}: {error}",
-                    output.display()
-                )
-            })?;
-        }
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect generated unit directory {}: {error}",
-                output.display()
-            ));
-        }
-    }
-    let mut permissions = fs::metadata(output)
-        .map_err(|error| format!("cannot inspect generated unit directory: {error}"))?
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(output, permissions).map_err(|error| {
-        format!(
-            "cannot set generated unit directory permissions {}: {error}",
-            output.display()
-        )
-    })
-}
-
-fn generated_directory_is_owned(output: &Path) -> bool {
-    fs::symlink_metadata(output.join(GENERATOR_MARKER))
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
-}
-
-fn generated_unit_directory() -> PathBuf {
-    env::var_os("FRACTALD_GENERATED_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| RuntimePaths::from_environment().directory.join("generator"))
-}
-
-fn generated_unit_directories() -> [PathBuf; 3] {
-    let normal = generated_unit_directory();
-    let parent = normal.parent().unwrap_or_else(|| Path::new(".")).to_owned();
-    let name = normal
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("generator")
-        .to_owned();
-    [
-        normal,
-        parent.join(format!("{name}.early")),
-        parent.join(format!("{name}.late")),
-    ]
-}
-
-fn generator_directories() -> Vec<PathBuf> {
-    if let Some(path) = env::var_os("FRACTALD_GENERATOR_DIR") {
-        return vec![PathBuf::from(path)];
-    }
-    if env::var_os("FRACTALD_SERVICE_DIR").is_some() {
-        return Vec::new();
-    }
-    if fractald_platform::is_root() {
-        vec![
-            PathBuf::from("/etc/systemd/system-generators"),
-            PathBuf::from("/run/systemd/system-generators"),
-            PathBuf::from("/usr/local/lib/systemd/system-generators"),
-            PathBuf::from("/usr/lib/systemd/system-generators"),
-        ]
-    } else {
-        let config_home = env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-        let runtime = env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(format!("/run/user/{}", fractald_platform::effective_uid()))
-            });
-        let mut directories = vec![
-            runtime.join("systemd/user-generators"),
-            PathBuf::from("/usr/local/lib/systemd/user-generators"),
-            PathBuf::from("/usr/lib/systemd/user-generators"),
+    if let Some(path) = native_device_path(name) {
+        let mut spec = ServiceSpec::new(name, "/bin/sh");
+        spec.args = vec![
+            OsString::from("-c"),
+            OsString::from("while [ ! -e \"$1\" ]; do sleep 1; done"),
+            OsString::from("fractald-device-wait"),
+            path.as_os_str().to_owned(),
         ];
-        if let Some(config_home) = config_home {
-            directories.insert(0, config_home.join("systemd/user-generators"));
-        }
-        directories
+        spec.main_expand_environment = false;
+        spec.service_type = fractald_core::ServiceType::Oneshot;
+        spec.remain_after_exit = true;
+        spec.default_dependencies = false;
+        spec.start_timeout = Duration::MAX;
+        spec.device_path = Some(path);
+        return Ok(Some(spec));
     }
+    Ok(None)
 }
 
 fn load_service_specs() -> Result<Vec<ServiceSpec>, String> {
     let directories = service_directories();
-    let state = StatePaths::from_environment();
-    let strict = env::var_os("FRACTALD_SERVICE_DIR").is_some();
     let names = discover_service_names(&directories)?;
     let mut specs = Vec::new();
     for name in names {
-        if state
-            .is_masked(&name)
-            .map_err(|error| format!("cannot inspect masked state for {name}: {error}"))?
-            || unit_path_is_masked(&directories, &name)?
-        {
-            continue;
-        }
-        let Some(unit) = load_unit(&directories, &name)? else {
+        let Some(path) = find_native_service_path(&name)? else {
             continue;
         };
-        match parse_loaded_unit(unit, &name, &directories) {
-            Ok(spec) => specs.push(spec),
-            Err(error) if strict => return Err(error),
-            Err(error) => {
-                eprintln!("fractald: skipping incompatible systemd unit {name}: {error}");
-            }
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let spec = fractald_config::parse_service(&source, &name)
+            .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
+        if !StatePaths::from_environment()
+            .is_masked(&name)
+            .map_err(|error| format!("cannot inspect masked state for {name}: {error}"))?
+        {
+            specs.push(spec);
         }
     }
     Ok(specs)
 }
 
 fn service_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
     if let Some(path) = env::var_os("FRACTALD_SERVICE_DIR") {
-        if env::var_os("FRACTALD_GENERATOR_DIR").is_some() || storage_generation_enabled() {
-            let [normal, early, late] = generated_unit_directories();
-            return vec![late, PathBuf::from(path), normal, early];
-        }
-        return vec![PathBuf::from(path)];
-    }
-    if fractald_platform::is_root() {
-        let [normal, early, late] = generated_unit_directories();
-        vec![
-            late,
-            PathBuf::from("/usr/lib/systemd/system"),
-            PathBuf::from("/usr/local/lib/systemd/system"),
-            PathBuf::from("/lib/systemd/system"),
-            PathBuf::from("/run/systemd/system"),
-            normal,
-            PathBuf::from("/etc/systemd/system"),
+        directories.push(PathBuf::from(path));
+    } else if fractald_platform::is_root() {
+        directories.extend([
+            PathBuf::from("/usr/lib/fractald/services"),
+            PathBuf::from("/usr/local/lib/fractald/services"),
+            PathBuf::from("/run/fractald/services"),
             PathBuf::from("/etc/fractald/services"),
-            early,
-        ]
+        ]);
     } else {
-        let config_home = env::var_os("XDG_CONFIG_HOME")
+        if let Some(config_home) = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        {
+            directories.push(config_home.join("fractald/services"));
+        }
         let runtime = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(format!("/run/user/{}", fractald_platform::effective_uid()))
+                PathBuf::from(format!(
+                    "/tmp/fractald-runtime-{}",
+                    fractald_platform::effective_uid()
+                ))
             });
-        let [normal, early, late] = generated_unit_directories();
-        let mut directories = vec![
-            late,
-            PathBuf::from("/usr/lib/systemd/user"),
-            PathBuf::from("/usr/local/lib/systemd/user"),
-            runtime.join("systemd/user"),
-            normal,
-        ];
-        if let Some(config_home) = config_home {
-            directories.push(config_home.join("systemd/user"));
-            directories.push(config_home.join("fractald/services"));
-        }
-        directories.push(early);
-        directories
+        directories.push(runtime.join("fractald/services"));
     }
+    if let Some(path) = native_storage_service_directory() {
+        directories.push(path);
+    }
+    directories
+}
+
+fn native_storage_service_directory() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("FRACTALD_STORAGE_SERVICE_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    if fractald_platform::is_root() || env::var_os("FRACTALD_STORAGE_FSTAB").is_some() {
+        return Some(RuntimePaths::from_environment().directory.join("services"));
+    }
+    None
+}
+
+fn prepare_native_storage_services() -> Result<(), String> {
+    let Some(output) = native_storage_service_directory() else {
+        return Ok(());
+    };
+    let fstab = env::var_os("FRACTALD_STORAGE_FSTAB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/etc/fstab"));
+    let source = match fs::read_to_string(&fstab) {
+        Ok(source) => source,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("cannot read {}: {error}", fstab.display())),
+    };
+    let entries = parse_fstab(&source)
+        .map_err(|error| format!("cannot parse {}: {error}", fstab.display()))?;
+    let units = generate_services(&entries)
+        .map_err(|error| format!("cannot generate native storage services: {error}"))?;
+    fs::create_dir_all(&output)
+        .map_err(|error| format!("cannot create {}: {error}", output.display()))?;
+    for entry in fs::read_dir(&output)
+        .map_err(|error| format!("cannot read {}: {error}", output.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("cannot enumerate {}: {error}", output.display()))?
+            .path();
+        if path.extension().and_then(|value| value.to_str()) == Some("svc") {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        }
+    }
+    for unit in units {
+        let path = output.join(&unit.name);
+        fs::write(&path, unit.source)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn discover_service_names(directories: &[PathBuf]) -> Result<BTreeSet<String>, String> {
@@ -1331,201 +944,39 @@ fn discover_service_names(directories: &[PathBuf]) -> Result<BTreeSet<String>, S
             let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if is_discoverable_unit_name(file_name) && path.is_file() {
-                if unit_path_is_masked(directories, file_name)? {
-                    continue;
-                }
-                if canonical_unit_name(directories, file_name)?.is_some() {
-                    continue;
-                }
-                names.insert(file_name.to_owned());
-            } else if file_name.ends_with(".d")
-                && is_discoverable_unit_name(file_name.trim_end_matches(".d"))
-                && path.is_dir()
-            {
-                let base = file_name.trim_end_matches(".d");
-                names.insert(base.to_owned());
-            } else if (file_name.ends_with(".wants") || file_name.ends_with(".requires"))
-                && path.is_dir()
-            {
-                let entries = fs::read_dir(&path).map_err(|error| {
-                    format!(
-                        "cannot read unit relationship directory {}: {error}",
-                        path.display()
-                    )
-                })?;
-                for entry in entries {
-                    let entry = entry
-                        .map_err(|error| format!("cannot enumerate {}: {error}", path.display()))?;
-                    let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                        continue;
-                    };
-                    if is_discoverable_unit_name(&name) {
-                        names.insert(canonical_unit_name(directories, &name)?.unwrap_or(name));
-                    }
-                }
+            if !file_name.ends_with(".svc") {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!("cannot inspect service path {}: {error}", path.display())
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!("service path {} is a symlink", path.display()));
+            }
+            if metadata.file_type().is_file() {
+                names.insert(file_name.trim_end_matches(".svc").to_owned());
             }
         }
     }
     Ok(names)
 }
 
-fn is_discoverable_unit_name(name: &str) -> bool {
-    [
-        ".automount",
-        ".device",
-        ".mount",
-        ".path",
-        ".service",
-        ".slice",
-        ".socket",
-        ".swap",
-        ".target",
-        ".timer",
-    ]
-    .iter()
-    .any(|suffix| name.ends_with(suffix))
-}
-
-fn augment_target_links(
-    spec: &mut ServiceSpec,
-    directories: &[PathBuf],
-    target: &str,
-) -> Result<(), String> {
-    for (suffix, destination) in [
-        ("wants", &mut spec.dependencies.wants),
-        ("requires", &mut spec.dependencies.requires),
-    ] {
-        for directory in directories {
-            let relationship_directory = directory.join(format!("{target}.{suffix}"));
-            let entries = match fs::read_dir(&relationship_directory) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "cannot read target relationship directory {}: {error}",
-                        relationship_directory.display()
-                    ));
-                }
-            };
-            for entry in entries {
-                let entry = entry.map_err(|error| {
-                    format!(
-                        "cannot enumerate {}: {error}",
-                        relationship_directory.display()
-                    )
-                })?;
-                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                if is_discoverable_unit_name(&name) {
-                    if fs::read_link(entry.path())
-                        .ok()
-                        .is_some_and(|path| path == PathBuf::from("/dev/null"))
-                    {
-                        continue;
-                    }
-                    destination.insert(canonical_unit_name(directories, &name)?.unwrap_or(name));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn canonical_unit_name(directories: &[PathBuf], name: &str) -> Result<Option<String>, String> {
-    let mut current = name.to_owned();
-    let mut seen = BTreeSet::new();
-    let mut changed = false;
-    while seen.insert(current.clone()) {
-        let mut link = None;
-        for directory in directories.iter().rev() {
-            let path = directory.join(&current);
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    link = Some(path);
-                    break;
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!("cannot inspect {}: {error}", path.display()));
-                }
-            }
-        }
-        let Some(link) = link else {
-            break;
-        };
-        let target = fs::read_link(&link)
-            .map_err(|error| format!("cannot read unit alias {}: {error}", link.display()))?;
-        let Some(target_name) = target.file_name().and_then(|value| value.to_str()) else {
-            break;
-        };
-        if target_name == current || target_name == "." || target_name == ".." {
-            break;
-        }
-        let target_exists = directories
-            .iter()
-            .any(|directory| fs::symlink_metadata(directory.join(target_name)).is_ok());
-        if !target_exists {
-            break;
-        }
-        current = target_name.to_owned();
-        changed = true;
-    }
-    Ok(changed.then_some(current))
-}
-
-fn unit_path_is_masked(directories: &[PathBuf], name: &str) -> Result<bool, String> {
-    for directory in directories.iter().rev() {
-        let path = directory.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                let target = fs::read_link(&path).map_err(|error| {
-                    format!("cannot read unit mask {}: {error}", path.display())
-                })?;
-                if target == Path::new("/dev/null") {
-                    return Ok(true);
-                }
-                let resolved = if target.is_absolute() {
-                    target
-                } else {
-                    path.parent().unwrap_or_else(|| Path::new(".")).join(target)
-                };
-                return match fs::canonicalize(&resolved) {
-                    Ok(resolved) => Ok(resolved == Path::new("/dev/null")),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-                    Err(error) => Err(format!(
-                        "cannot resolve unit mask {}: {error}",
-                        path.display()
-                    )),
-                };
-            }
-            Ok(_) => return Ok(false),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!("cannot inspect {}: {error}", path.display()));
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn template_unit_name(name: &str) -> Option<String> {
-    let (stem, suffix) = name.rsplit_once('.')?;
-    let at = stem.rfind('@')?;
-    if at + 1 == stem.len() {
-        return None;
-    }
-    Some(format!("{}@.{suffix}", &stem[..at]))
-}
-
-fn find_unit_path(directories: &[PathBuf], name: &str) -> Result<Option<PathBuf>, String> {
-    for directory in directories.iter().rev() {
-        let path = directory.join(name);
+fn find_native_service_path(name: &str) -> Result<Option<PathBuf>, String> {
+    let name = native_service_name(name);
+    for directory in service_directories().iter().rev() {
+        let path = directory.join(format!("{name}.svc"));
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_dir() => {
-                return Err(format!("unit path {} is a directory", path.display()));
+                return Err(format!("service path {} is a directory", path.display()));
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("service path {} is a symlink", path.display()));
+            }
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(format!(
+                    "service path {} is not a regular file",
+                    path.display()
+                ));
             }
             Ok(_) => return Ok(Some(path)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1535,153 +986,45 @@ fn find_unit_path(directories: &[PathBuf], name: &str) -> Result<Option<PathBuf>
     Ok(None)
 }
 
-fn load_unit(
-    directories: &[PathBuf],
-    name: &str,
-) -> Result<Option<fractald_config::UnitFile>, String> {
-    if unit_path_is_masked(directories, name)? {
-        return Ok(None);
-    }
-    let template = template_unit_name(name);
-    let mut base_path = find_unit_path(directories, name)?;
-    if base_path.is_none() {
-        if let Some(template) = template.as_deref() {
-            if unit_path_is_masked(directories, template)? {
-                return Ok(None);
-            }
-            base_path = find_unit_path(directories, template)?;
-        }
-    }
-
-    let mut unit = match base_path {
-        Some(ref path) => {
-            let source = fs::read_to_string(path)
-                .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-            fractald_config::UnitFile::parse(&source)
-                .map_err(|error| format!("cannot parse {}: {error}", path.display()))?
-        }
-        None => fractald_config::UnitFile::default(),
-    };
-    let mut found_drop_in = false;
-    let mut drop_in_names = Vec::with_capacity(2);
-    if let Some(template) = template.as_deref() {
-        drop_in_names.push(template);
-    }
-    drop_in_names.push(name);
-    for directory in directories {
-        for drop_in_name in &drop_in_names {
-            let drop_in_directory = directory.join(format!("{drop_in_name}.d"));
-            let entries = match fs::read_dir(&drop_in_directory) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(format!(
-                        "cannot read drop-in directory {}: {error}",
-                        drop_in_directory.display()
-                    ));
-                }
-            };
-            let mut paths = entries
-                .map(|entry| entry.map(|entry| entry.path()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    format!("cannot enumerate {}: {error}", drop_in_directory.display())
-                })?;
-            paths.sort();
-            for path in paths {
-                if path.extension().and_then(|value| value.to_str()) != Some("conf") {
-                    continue;
-                }
-                let source = fs::read_to_string(&path)
-                    .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-                let overlay = fractald_config::UnitFile::parse(&source)
-                    .map_err(|error| format!("cannot parse {}: {error}", path.display()))?;
-                unit.merge(overlay);
-                found_drop_in = true;
-            }
-        }
-    }
-    if base_path.is_none() && !found_drop_in {
-        Ok(None)
+fn native_device_path(name: &str) -> Option<PathBuf> {
+    let (prefix, encoded) = if let Some(encoded) = name.strip_prefix("device-dev-") {
+        ("/dev/", encoded)
+    } else if let Some(encoded) = name.strip_prefix("device-sys-") {
+        ("/sys/", encoded)
     } else {
-        Ok(Some(unit))
-    }
-}
-
-fn load_openrc_specs() -> Result<Vec<ServiceSpec>, String> {
-    let Some(directory) = openrc_directory() else {
-        return Ok(Vec::new());
-    };
-    let state = StatePaths::from_environment();
-    let strict = env::var_os("FRACTALD_OPENRC_DIR").is_some();
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "cannot read OpenRC directory {}: {error}",
-                directory.display()
-            ));
-        }
-    };
-    let mut paths = entries
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("cannot enumerate {}: {error}", directory.display()))?;
-    paths.sort();
-
-    let mut specs = Vec::new();
-    for path in paths {
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if name.starts_with('.') {
-            continue;
-        }
-        if state
-            .is_masked(name)
-            .map_err(|error| format!("cannot inspect masked state for {name}: {error}"))?
-        {
-            continue;
-        }
-        let source = fs::read_to_string(&path)
-            .map_err(|error| format!("cannot read OpenRC script {}: {error}", path.display()))?;
-        match fractald_config::parse_openrc_script(&source, name, &path) {
-            Ok(spec) => specs.push(spec),
-            Err(error) if strict => {
-                return Err(format!(
-                    "cannot parse OpenRC script {}: {error}",
-                    path.display()
-                ));
-            }
-            Err(error) => {
-                eprintln!(
-                    "fractald: skipping incompatible OpenRC script {}: {error}",
-                    path.display()
-                );
-            }
-        }
-    }
-    Ok(specs)
-}
-
-fn openrc_directory() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("FRACTALD_OPENRC_DIR") {
-        return Some(PathBuf::from(path));
-    }
-    if env::var_os("FRACTALD_SERVICE_DIR").is_some() {
         return None;
+    };
+    let mut path = prefix.to_owned();
+    let bytes = encoded.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1] == b'x'
+            && hex_digit(bytes[index + 2]).is_some()
+            && hex_digit(bytes[index + 3]).is_some()
+        {
+            let high = hex_digit(bytes[index + 2]).expect("validated hex digit");
+            let low = hex_digit(bytes[index + 3]).expect("validated hex digit");
+            path.push(char::from((high << 4) | low));
+            index += 4;
+        } else if bytes[index] == b'-' {
+            path.push('/');
+            index += 1;
+        } else {
+            path.push(char::from(bytes[index]));
+            index += 1;
+        }
     }
-    if fractald_platform::is_root() {
-        Some(PathBuf::from("/etc/init.d"))
-    } else {
-        env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .map(|path| path.join("fractald/init.d"))
+    Some(PathBuf::from(path))
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -2292,14 +1635,12 @@ fn daemon_loop(
                             },
                         }
                     }
-                    Ok(Request::Reload) => match load_all_service_specs()
-                        .map_err(|error| error.to_string())
-                        .and_then(|specs| {
-                            supervisor.reload(specs).map_err(|error| error.to_string())
-                        }) {
-                        Ok(()) => Response::Reloaded,
-                        Err(message) => Response::Error { message },
-                    },
+                    Ok(Request::Reload) => {
+                        match reload_native_configuration(&mut *supervisor, state) {
+                            Ok(()) => Response::Reloaded,
+                            Err(message) => Response::Error { message },
+                        }
+                    }
                     Ok(Request::Subscribe(_)) => Response::Error {
                         message: "event subscription could not be registered".to_owned(),
                     },
@@ -2648,75 +1989,88 @@ fn wait_without_pidfd(child: &mut Child) -> Result<ExitKind, String> {
 }
 
 fn usage() -> String {
-    "usage: fractald <daemon|storage-prepare|self-check|chaos|inspect-unit|run|help|version>\n       fractald run <command> [args...]\n       fractald inspect-unit <path>\n       fractald (as PID 1)".to_owned()
+    "usage: fractald <daemon|storage-prepare|self-check|chaos|inspect-service|run|help|version>\n       fractald run <command> [args...]\n       fractald inspect-service <path>\n       fractald (as PID 1)".to_owned()
 }
 
 fn print_help() {
     println!(
-        "FractalD service supervisor\n\nCommands:\n  daemon                     run the control daemon\n  storage-prepare            activate discovered storage topology\n  self-check                 exercise supervisor and chaos invariants\n  chaos [list]               list the supported dynamics\n  chaos sample <system>      print a deterministic sample\n  inspect-unit <path>        validate and inspect a systemd service unit\n  run <command> [args...]    supervise one foreground command\n  help, --help               show this help\n  version, --version         show the version"
+        "FractalD native service manager\n\nCommands:\n  daemon                     run the service manager\n  --pid1                     run as the standalone process 1 manager\n  storage-prepare            activate discovered storage topology\n  self-check                 exercise supervisor and chaos invariants\n  chaos [list]               list the supported dynamics\n  chaos sample <system>      print a deterministic sample\n  inspect-service <path>     validate and inspect a native .svc file\n  run <command> [args...]    supervise one foreground command\n  help, --help               show this help\n  version, --version         show the version"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
 
     #[test]
-    fn recognizes_dev_null_unit_masks_at_the_highest_priority() {
+    fn generates_parseable_native_storage_descriptors() {
+        let entries = parse_fstab(
+            "UUID=pool /srv/pool btrfs compress=zstd:1 0 0\n/dev/mapper/vg-data /srv/pool/data xfs nofail 0 0\n/dev/zram0 none swap pri=100 0 0\n",
+        )
+        .expect("fstab");
+        let services = generate_services(&entries).expect("storage services");
+        assert!(services.iter().any(|service| service.name == "storage.svc"));
+        assert!(
+            services
+                .iter()
+                .all(|service| service.name.ends_with(".svc"))
+        );
+        assert!(
+            services
+                .iter()
+                .all(|service| service.source.starts_with("[service]"))
+        );
+        assert!(
+            services
+                .iter()
+                .all(|service| !service.source.contains("[Unit]"))
+        );
+        for service in services {
+            let name = service.name.trim_end_matches(".svc");
+            fractald_config::parse_service(&service.source, name).expect("native service");
+        }
+    }
+
+    #[test]
+    fn deduplicates_native_device_dependencies_shared_by_ordering_edges() {
+        let mut spec = ServiceSpec::new("data", "/bin/true");
+        spec.dependencies
+            .requires
+            .insert("device-dev-vda".to_owned());
+        spec.dependencies.after.insert("device-dev-vda".to_owned());
+
+        let dependencies = native_device_dependencies(&spec, &BTreeSet::new());
+        assert_eq!(dependencies, ["device-dev-vda".to_owned()].into());
+    }
+
+    #[test]
+    fn decodes_native_device_service_names() {
+        assert_eq!(
+            native_device_path(r"device-dev-disk-by\x2duuid-1234"),
+            Some(PathBuf::from("/dev/disk/by-uuid/1234"))
+        );
+        assert_eq!(
+            native_device_path("device-sys-devices-virtual-block-vda"),
+            Some(PathBuf::from("/sys/devices/virtual/block/vda"))
+        );
+    }
+
+    #[test]
+    fn discovers_only_native_service_descriptors() {
         let root = std::env::temp_dir().join(format!(
-            "fractald-unit-mask-{}-{}",
+            "fractald-services-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos()
         ));
-        let low = root.join("low");
-        let high = root.join("high");
-        fs::create_dir_all(&low).expect("low directory");
-        fs::create_dir_all(&high).expect("high directory");
-        fs::write(low.join("demo.service"), "[Service]\nExecStart=/bin/true\n").expect("unit");
-        symlink("/dev/null", high.join("demo.service")).expect("mask");
-
-        assert!(
-            unit_path_is_masked(&[low.clone(), high.clone()], "demo.service")
-                .expect("inspect mask")
-        );
-
-        fs::remove_file(high.join("demo.service")).expect("remove mask");
-        fs::write(
-            high.join("demo.service"),
-            "[Service]\nExecStart=/bin/true\n",
-        )
-        .expect("higher priority unit");
-        assert!(!unit_path_is_masked(&[low, high], "demo.service").expect("inspect unit"));
-
+        fs::create_dir_all(&root).expect("service directory");
+        fs::write(root.join("demo.svc"), "[service]\nexec=/bin/true\n").expect("service");
+        fs::write(root.join("ignored.conf"), "[service]\nexec=/bin/true\n").expect("other file");
+        let names = discover_service_names(std::slice::from_ref(&root)).expect("service names");
+        assert_eq!(names, ["demo".to_owned()].into());
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn parses_native_storage_units_without_systemd_generators() {
-        let entries = parse_fstab(
-            "UUID=pool /srv/pool btrfs compress=zstd:1 0 0\n/dev/mapper/vg-data /srv/pool/data xfs nofail 0 0\n/dev/zram0 none swap pri=100 0 0\n",
-        )
-        .expect("fstab");
-        for unit in generate_units(&entries).expect("storage units") {
-            let parsed = fractald_config::UnitFile::parse(&unit.source).expect("unit syntax");
-            parse_loaded_unit(parsed, &unit.name, &[]).expect("unit compatibility");
-        }
-    }
-
-    #[test]
-    fn deduplicates_device_dependencies_shared_by_ordering_edges() {
-        let mut spec = ServiceSpec::new("data.mount", "/bin/true");
-        spec.dependencies
-            .requires
-            .insert("dev-vda.device".to_owned());
-        spec.dependencies.after.insert("dev-vda.device".to_owned());
-
-        let dependencies = synthetic_device_dependencies(&spec, &BTreeSet::new());
-        assert_eq!(dependencies, ["dev-vda.device".to_owned()].into());
     }
 
     #[test]
@@ -2729,139 +2083,5 @@ mod tests {
             resolve_crypttab_source("none").expect("none source"),
             Some("none".to_owned())
         );
-    }
-
-    #[test]
-    fn loads_template_units_with_instance_drop_ins() {
-        let root = std::env::temp_dir().join(format!(
-            "fractald-template-unit-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fs::create_dir_all(root.join("worker@0.service.d")).expect("drop-in directory");
-        fs::write(
-            root.join("worker@.service"),
-            "[Service]\nExecStart=/bin/true\nEnvironment=BASE=template\n",
-        )
-        .expect("template unit");
-        fs::write(
-            root.join("worker@0.service.d/50-instance.conf"),
-            "[Service]\nEnvironment=INSTANCE=zero\n",
-        )
-        .expect("instance drop-in");
-
-        let unit = load_unit(&[root.clone()], "worker@0.service")
-            .expect("load template instance")
-            .expect("template unit exists");
-        assert_eq!(unit.value("Service", "ExecStart"), Some("/bin/true"));
-        assert_eq!(unit.value("Service", "Environment"), Some("INSTANCE=zero"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn discovers_slice_and_automount_units_for_boot_transactions() {
-        let root = std::env::temp_dir().join(format!(
-            "fractald-unit-kinds-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fs::create_dir_all(root.join("slices.target.wants")).expect("relationship directory");
-        fs::write(
-            root.join("application.slice"),
-            "[Unit]\nDescription=Application slice\n",
-        )
-        .expect("slice unit");
-        fs::write(
-            root.join("data.automount"),
-            "[Automount]\nWhere=/srv/data\n",
-        )
-        .expect("automount unit");
-        symlink(
-            "../application.slice",
-            root.join("slices.target.wants/application.slice"),
-        )
-        .expect("slice relationship");
-        symlink(
-            "../data.automount",
-            root.join("slices.target.wants/data.automount"),
-        )
-        .expect("automount relationship");
-
-        let names = discover_service_names(std::slice::from_ref(&root)).expect("unit names");
-        assert!(names.contains("application.slice"));
-        assert!(names.contains("data.automount"));
-        assert!(is_discoverable_unit_name("application.slice"));
-        assert!(is_discoverable_unit_name("data.automount"));
-        assert!(is_discoverable_unit_name("dev-vda.device"));
-
-        assert_eq!(
-            device_unit_path(r"dev-disk-by\x2duuid-1234.device"),
-            Some(PathBuf::from("/dev/disk/by-uuid/1234"))
-        );
-        assert_eq!(
-            device_unit_path("sys-devices-virtual-block-vda.device"),
-            Some(PathBuf::from("/sys/devices/virtual/block/vda"))
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn executes_a_generator_with_the_standard_output_arguments() {
-        let root = std::env::temp_dir().join(format!(
-            "fractald-generator-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        let directory = root.join("generators");
-        let output = root.join("generator");
-        let early = root.join("generator.early");
-        let late = root.join("generator.late");
-        fs::create_dir_all(&directory).expect("generator directory");
-        fs::create_dir_all(&output).expect("generator output");
-        fs::create_dir_all(&early).expect("early generator output");
-        fs::create_dir_all(&late).expect("late generator output");
-        let generator = directory.join("demo-generator");
-        fs::write(
-            &generator,
-            "#!/bin/sh\nprintf '[Service]\\nExecStart=/bin/true\\n' > \"$1/demo.service\"\nprintf early > \"$2/early.marker\"\nprintf late > \"$3/late.marker\"\n",
-        )
-        .expect("generator");
-        let mut permissions = fs::metadata(&generator)
-            .expect("generator metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&generator, permissions).expect("generator executable");
-
-        run_generators(
-            std::slice::from_ref(&directory),
-            &[output.clone(), early.clone(), late.clone()],
-            Duration::from_secs(2),
-        )
-        .expect("run generator");
-        assert_eq!(
-            fs::read_to_string(output.join("demo.service")).expect("generated unit"),
-            "[Service]\nExecStart=/bin/true\n"
-        );
-        assert_eq!(
-            fs::read_to_string(early.join("early.marker")).expect("early marker"),
-            "early"
-        );
-        assert_eq!(
-            fs::read_to_string(late.join("late.marker")).expect("late marker"),
-            "late"
-        );
-
-        let _ = fs::remove_dir_all(root);
     }
 }

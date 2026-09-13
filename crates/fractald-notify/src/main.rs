@@ -11,7 +11,7 @@ fn main() -> ExitCode {
     match run(env::args_os().skip(1)) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("systemd-notify: {error}");
+            eprintln!("fractald-notify: {error}");
             ExitCode::from(1)
         }
     }
@@ -33,7 +33,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<u8, String> {
         return Ok(0);
     }
     if options.version {
-        println!("systemd-notify (FractalD) {}", env!("CARGO_PKG_VERSION"));
+        println!("fractald-notify (FractalD) {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
     if options.booted && !manager_is_booted() {
@@ -42,8 +42,8 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<u8, String> {
     if options.fields.is_empty() {
         return Ok(0);
     }
-    let socket =
-        env::var_os("NOTIFY_SOCKET").ok_or_else(|| "NOTIFY_SOCKET is not set".to_owned())?;
+    let socket = env::var_os("FRACTALD_NOTIFY_SOCKET")
+        .ok_or_else(|| "FRACTALD_NOTIFY_SOCKET is not set".to_owned())?;
     let payload = options.fields.join("\n") + "\n";
     send_notification(socket.as_os_str().as_bytes(), payload.as_bytes())
         .map_err(|error| format!("cannot send notification: {error}"))?;
@@ -152,8 +152,12 @@ fn validate_field(value: &str) -> Result<(), String> {
 }
 
 fn send_notification(address: &[u8], payload: &[u8]) -> io::Result<()> {
-    let address = CString::new(address)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NOTIFY_SOCKET contains NUL"))?;
+    let address = CString::new(address).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "FRACTALD_NOTIFY_SOCKET contains NUL",
+        )
+    })?;
     fractald_platform::send_unix_datagram(&address, payload)
 }
 
@@ -169,7 +173,7 @@ fn manager_is_booted() -> bool {
 
 fn print_help() {
     println!(
-        "systemd-notify (FractalD)\n\nUsage: systemd-notify [OPTIONS] [KEY=VALUE ...]\n\n  --ready              report service readiness\n  --status STATUS      report service status\n  --watchdog           report a watchdog heartbeat\n  --reloading          report configuration reload\n  --stopping           report service shutdown\n  --pid PID            report the main process ID\n  --booted             test whether FractalD is running\n  --no-block, --wait   accept standard compatibility options\n  --help               show this help\n  --version            show the version"
+        "fractald-notify (FractalD)\n\nUsage: fractald-notify [OPTIONS] [KEY=VALUE ...]\n\n  --ready              report service readiness\n  --status STATUS      report service status\n  --watchdog           report a watchdog heartbeat\n  --reloading          report configuration reload\n  --stopping           report service shutdown\n  --pid PID            report the main process ID\n  --booted             test whether FractalD is running\n  --no-block, --wait   accept standard compatibility options\n  --help               show this help\n  --version            show the version"
     );
 }
 

@@ -98,6 +98,7 @@ int fractald_set_activation_stdin(void);
 int fractald_install_shutdown_handlers(void);
 int fractald_shutdown_requested(void);
 int fractald_power_action(int action);
+int fractald_prepare_pid1_mounts(void);
 int fractald_set_child_subreaper(void);
 int fractald_reap_untracked_children(const uint32_t *managed_pids, size_t managed_count);
 

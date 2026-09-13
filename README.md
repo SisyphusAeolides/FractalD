@@ -1,120 +1,105 @@
 # FractalD
 
-FractalD is a Linux service manager built around a small, explicit supervisor core. It is designed to provide the operational depth expected by systemd while keeping the control path understandable and the common service path close to OpenRC.
+FractalD is a standalone Linux service manager and native PID1 for Arch based
+systems. It owns the boot process, service graph, process supervision, storage
+activation, package integration, and local control socket. It does not read,
+execute, or generate configuration for another init system.
 
-The project has three layers:
+Arch Linux and CachyOS are the primary development targets. The native service
+format uses `.svc` files stored below `/usr/lib/fractald/services`,
+`/usr/local/lib/fractald/services`, `/run/fractald/services`, or
+`/etc/fractald/services`.
 
-- Chaos defines declarative service policy and compatibility mappings.
-- Rust owns configuration, dependency graphs, lifecycle state, supervision, and control protocols.
-- C contains the small Linux boundary for pidfds and other primitives that need direct kernel ABI access.
+## Native service descriptors
 
-The repository currently contains a working service-manager slice: systemd-style unit parsing, standard unit search paths with drop-ins, target transactions, socket activation, timer and path triggers, mount and swap units, synthetic device units, slice lifecycle nodes, eager automount transactions, manager shutdown action units, `RequiresMountsFor=` path-derived mount ordering, `DefaultDependencies=` type-specific ordering and shutdown conflicts, `StopWhenUnneeded=` reclamation, template instances, conditions, `ExecCondition`, environment files, managed credential files, runtime/state/cache/log directory setup, service output forwarding with local logs and rotation, notify and forking services, credential-checked `NotifyAccess` readiness and watchdog messages, pidfd and process-group supervision, parent-death cleanup, restart backoff, persistent enablement, a durable bounded state event log, optional cgroup v2 resource ownership, a local daemon control socket, `fractalctl`, and a `systemctl` compatibility binary. OpenRC scripts, runlevels, `rc-service`, and `rc-status` are handled through a separate shell adapter. The workspace also contains a Rust/C RustyBox multi-call userland with a deterministic chaos applet.
+A minimal service is explicit and easy to inspect:
 
-## Arch-first development
+```ini
+[service]
+description=Example worker
+kind=simple
+exec=/usr/bin/example-worker
+restart=on-failure
 
-Arch Linux and CachyOS are the primary development environments for FractalD.
-Install the native build toolchain before running the checks:
+[dependencies]
+after=network-online
+
+[install]
+profile=boot
+```
+
+`[dependencies]` supports required, wanted, ordering, conflict, binding, and
+recovery relationships. Native kinds cover processes, listeners, timers,
+filesystem watches, mounts, swaps, devices, and grouping profiles. Hardening,
+credentials, resource limits, conditions, environment setup, and lifecycle
+hooks use the same descriptor.
+
+Package owned descriptors are validated and discovered from the Arch pacman
+local database. The installed `90-fractald-package.hook` runs
+`fractald-package-trigger sync` after a transaction. Descriptors marked with
+`profile=boot` are enabled automatically, removed descriptors are disabled,
+and a running FractalD instance receives a native reload request.
+
+## Build on Arch
 
 ```sh
 sudo pacman -S --needed base-devel rust clang
+make check
+make test
+make native-check
 ```
 
-## Build
+Build an Arch package from the included metadata:
 
 ```sh
-make test
-make run-self-check
-make compatibility-check
-make unit-inventory-check
-make device-unit-check
-make recovery-check
-make package-check
-make rustybox-check
-make pid1-check                 # run inside a direct PID1 validation boot
-make pid1-storage-check         # run inside the Arch storage matrix boot
-make pid1-storage-recovery-check # cycle providers and remount through FractalD
-make pid1-static-initramfs      # build an independent, pruned boot image
+makepkg -Csi -f packaging/arch/PKGBUILD
 ```
 
-The control binary supports boot integration and immediate activation:
+Install the native tools into a staging root with `make install`. The package
+places the PID1 binary at `/usr/bin/fractald`, a copy at
+`/usr/lib/fractald/init`, native descriptors below `/usr/lib/fractald/services`,
+and the pacman hook below `/usr/share/libalpm/hooks`.
+
+## Control
+
+`fractalctl` talks directly to FractalD through its Unix socket:
 
 ```sh
 fractalctl enable
-fractalctl enable --now
-fractalctl start example.service
-fractalctl stop example.service
-fractalctl status
-fractalctl stop
-fractalctl disable --now
-fractalctl mask example.service
-fractalctl unmask example.service
-fractalctl reset-failed [SERVICE]
-fractalctl events [SINCE] [--follow]
+fractalctl start example
+fractalctl status example
+fractalctl stop example
+fractalctl disable example
+fractalctl mask example
+fractalctl unmask example
+fractalctl list
+fractalctl events --follow
 ```
 
-`enable --now` writes the boot unit and starts FractalD. `disable --now` removes the boot link and stops a running daemon. The `--now` option is accepted before or after `enable` and `disable`; service operations remain explicit with `start` and `stop`. `isolate TARGET` starts an `AllowIsolate=yes` target and stops units outside its dependency closure while retaining `IgnoreOnIsolate=yes` units. `mask` persists a start prohibition and safely stops a loaded service before reloading definitions; `unmask` removes it without starting the service. `events [SINCE]` replays the flushed state event log from persistent state without requiring a running daemon. `events [SINCE] --follow` attaches to the daemon’s Unix control socket, replays records at or after the requested sequence, and keeps the stream open for new lifecycle changes. Set `FRACTALD_EVENT_LOG_EVENTS` to change the retained event count from its default of 4096. Set `FRACTALD_UNIT_DIR` and `FRACTALD_RUNTIME_DIR` to test these operations in an isolated tree.
+`fractalctl enable` writes `/etc/fractald/boot.conf` and persists the `boot`
+profile marker. A bootloader or initramfs can select `/usr/bin/fractald` with
+`init=/usr/bin/fractald`; when FractalD is PID1 it prepares `/proc`, `/sys`,
+`/run`, `/dev`, and cgroup v2 before loading services. The `boot` profile and
+package markers then provide the initial service set.
 
-When `FRACTALD_STORAGE_ENABLE=1` or `FRACTALD_STORAGE_FSTAB` is set, FractalD parses `fstab` itself and creates native mount and swap units. The storage preparation unit scans multi-device Btrfs filesystems, assembles mdraid, activates LVM, and opens non-interactive `crypttab` mappings before the mount transaction. Filesystem selection is passed through to the kernel and `mount`, so the unit path is usable with any filesystem supported by the installed kernel and mount helpers, including FAT, ext, XFS, Btrfs, and other local or network filesystems. The early boot path resolves UUID, LABEL, PARTUUID, and PARTLABEL references for root, fstab, and crypttab even when udev has not created `/dev/disk` symlinks; common `fat`, `msdos`, and `ext` aliases are normalized to `vfat` and `ext4`.
+Use `FRACTALD_SERVICE_DIR`, `FRACTALD_STATE_DIR`, and
+`FRACTALD_RUNTIME_DIR` to run isolated development instances. Use
+`FRACTALD_PACKAGE_DB` and `FRACTALD_PACKAGE_ROOT` to test package detection
+against a fixture database.
 
-Service definitions are loaded from `FRACTALD_SERVICE_DIR` when set. Otherwise FractalD searches the normal system or user systemd directories and the FractalD service directory, applying higher-priority unit fragments and every matching `.d/*.conf` drop-in. Executable systemd generators are run into FractalD’s private generated-unit directory before startup and configuration reload; set `FRACTALD_GENERATOR_DIR` to use a controlled generator directory or `FRACTALD_GENERATED_DIR` to select its output directory. Each generator receives the normal, early, and late output arguments. A generator is bounded by `FRACTALD_GENERATOR_TIMEOUT_MS` (default 5 seconds), and a failed generator is reported without stopping the manager. Persistent masks and `/dev/null` unit masks are honored before a definition is loaded. Targets consume `.wants` and `.requires` links and start their dependency graph as one nonblocking transaction. `Conflicts` stops an already active opposing unit before the start transaction proceeds; `RefuseManualStart=` and `RefuseManualStop=` keep units available for dependency activation and manager shutdown while rejecting direct operator requests; `PartOf` follows explicit owner stops, `BindsTo` pulls in its bound units and follows device or service loss, `OnFailure` starts recovery units after a service enters the failed state, and `OnSuccess` starts completion units after a service exits successfully. `RequiresMountsFor=` and `WantsMountsFor=` pull parent-ordered mount units into a start transaction. Synthetic `.device` names for `/dev` and `/sys` paths wait for the kernel path to appear and propagate hot unplug. `Sockets=` pulls declared socket units into a service start transaction. `StartLimitIntervalSec=` and `StartLimitBurst=` apply a sliding-window start rate limit to manual and automatic starts; `reset-failed` clears that counter. `RuntimeMaxSec=` terminates a service that remains running beyond its configured lifetime and routes the timeout through normal failure and restart policy handling. Socket units open stream, datagram, sequential packet, FIFO, netlink, special, and abstract Unix listeners, honoring `SocketMode`, `SocketUser`, `SocketGroup`, `FileDescriptorName`, and `RemoveOnStop`; stream and sequential packet `Accept=yes` units pass one connection to a service template, while ordinary sockets use `LISTEN_FDS` and `LISTEN_FDNAMES` descriptor passing. Timer units support monotonic schedules, common calendar expressions, `Persistent=yes` catch-up state, `RandomizedDelaySec=` jitter, and bounded `AccuracySec=` coalescing; persistent timer records live below `FRACTALD_TIMER_STATE_DIR` or the manager state directory. Path units poll `PathChanged`, `PathModified`, `PathExists`, `PathExistsGlob`, and `DirectoryNotEmpty` watches without blocking the control loop. Mount units prepare their mount point, run `mount`, and run the configured `umount` teardown when stopped; swap units use the corresponding `swapon` and `swapoff` commands. `RuntimeDirectory`, `StateDirectory`, `CacheDirectory`, and `LogsDirectory` are created before conditions and hooks, exported through the matching environment variables, and runtime directories are removed when FractalD created them unless preserved. `LoadCredential` and `SetCredential` create a private per-unit directory, export it as `CREDENTIALS_DIRECTORY`, and remove it after teardown; `%d` expands to that directory. `LoadCredential=NAME[:PATH]` accepts explicit files and the terse or relative store form, searching the manager credential stores when the source is omitted or a credential identifier. `ImportCredential=` loads exact names or a single trailing-`*` prefix from the system credential directory and the conventional `/etc/credstore`, `/run/credstore`, and `/usr/lib/credstore` stores, with optional renaming and load-over-import-over-set precedence. Set `FRACTALD_CREDENTIAL_STORE_PATH` to a colon-separated store list when a controlled search path is needed. Imported credentials are optional, copied read-only, and share a 1 MiB per-unit size limit. Template requests such as `worker@alpha.service` resolve against `worker@.service` and expand common unit specifiers. Filesystem aliases and `[Install] Alias=` declarations resolve to the canonical service in the supervisor registry. An explicitly configured service directory is strict; incompatible units found in system directories are reported and skipped so one optional feature does not prevent the manager from starting. `FRACTALD_STATE_DIR` controls persistent service enablement and masks. Directory roots can be isolated with `FRACTALD_RUNTIME_DIRECTORY_ROOT`, `FRACTALD_STATE_DIRECTORY_ROOT`, `FRACTALD_CACHE_DIRECTORY_ROOT`, and `FRACTALD_LOGS_DIRECTORY_ROOT`; set `FRACTALD_CREDENTIALS_ROOT` to isolate credential storage.
+## Project layout
 
-At startup FractalD also consumes standard target `.wants` and `.requires` links, so package enablement created before a manager handoff remains effective. The compatibility `systemctl list-unit-files` and `systemctl is-enabled` commands inspect those links as well as FractalD’s persistent state markers.
+- `fractald-core` defines service records, lifecycle states, and dependency
+  planning.
+- `fractald-config` parses the native `.svc` format and validates directives.
+- `fractald-supervisor` owns process, listener, timer, mount, credential, and
+  resource supervision.
+- `fractald-storage` turns `fstab` and `crypttab` into native storage services.
+- `fractald-control` defines the local control protocol and persistent state.
+- `fractald-platform` contains the small C boundary for Linux kernel calls.
+- `fractald-package-trigger` connects pacman package contents to service state.
+- `rustybox` supplies the optional native initramfs applets and chaos tools.
 
-OpenRC scripts are read from `FRACTALD_OPENRC_DIR`, or from `/etc/init.d` for a system manager when no isolated service directory is selected. The adapter executes `start`, `stop`, and `reload` through a controlled shell child, extracts `need`, `use`, `after`, and `before` relationships from `depend()`, and gives each script the same process-group cleanup as a native service. Set `FRACTALD_OPENRC_RUNLEVEL` to start the corresponding runlevel directory at daemon boot. The installed `rc-service` and `rc-status` commands delegate to the same control socket.
-
-Service input and output follow the unit configuration. `StandardInput` accepts `null`, `data`, `inherit`, `tty`, `tty-force`, `file:/absolute/path`, and `socket`; `TTYPath` selects the terminal for tty modes. `StandardOutput` and `StandardError` accept `journal`, `null`, `inherit`, `tty`, `socket`, `file:/absolute/path`, `append:/absolute/path`, and `truncate:/absolute/path`; journal modes retain FractalD’s local sink and forward native journal datagrams when `/run/systemd/journal/socket` is available. Set `FRACTALD_JOURNAL_SOCKET` to select another native journal endpoint. Set `FRACTALD_LOG_MAX_BYTES` to change the append log rotation threshold from its default of 16 MiB. Files are created with mode 0600 and log directories with mode 0700. Stream `Accept=yes` sockets pass one accepted connection to a service template on fd 0 and connect fd 1 or 2 when the matching output mode is `socket`; datagram `Accept=yes` sockets and multiple per-connection listeners are rejected. `SocketMode`, `SocketUser`, and `SocketGroup` apply to filesystem listeners. `LimitNOFILE=soft:hard`, `LimitMEMLOCK=soft:hard` (with byte suffixes such as `KiB`), and `LimitNPROC=soft:hard` apply the service’s resource limits before the configured identity change. `SupplementaryGroups` sets an explicit supplementary group list after resolving the configured user and primary group. `DynamicUser=yes` assigns a collision-checked transient numeric UID/GID without editing account databases, reuses it across reloads of the same loaded unit, and supplies `ProtectSystem=strict`, `ProtectHome=read-only`, and `PrivateTmp=yes` defaults when those settings are not explicit; if `SupplementaryGroups=` is omitted, inherited supplementary groups are cleared. `UnsetEnvironment` removes inherited variables from the main process and lifecycle helpers. `KillMode` supports `control-group`, `process`, `mixed`, and `none` signal semantics. `KillSignal=`, `RestartKillSignal=`, and `SendSIGHUP=` control ordinary and restart termination, and `IgnoreSIGPIPE=` sets the signal disposition for lifecycle children. `MemoryDenyWriteExecute=yes` and `RestrictRealtime=yes` are enforced before launch. `PrivateTmp=yes` uses private host-backed `/tmp` and `/var/tmp` directories mounted into the service namespace; `PrivateTmp=disconnected` uses fresh tmpfs instances. `PrivateMounts=yes` gives the service and its lifecycle helpers a private mount namespace while preserving the existing mount view. `PrivateIPC=yes` gives them a private System V IPC and POSIX message queue namespace. `PrivateNetwork=yes` gives the service and its lifecycle helpers a separate network namespace. `ProtectSystem=yes`, `full`, and `strict` add read-only system mounts, while `ProtectHome=yes`, `read-only`, and `tmpfs` hide or restrict home trees. `ReadWritePaths=` and FractalD-managed service directories restore explicit writable paths after filesystem protection. `ReadOnlyPaths=` adds read-only path mounts, and `InaccessiblePaths=` overlays existing paths with empty inaccessible mounts. These isolation and hardening settings apply before identity changes; namespace, mount, or kernel restriction failures fail the child spawn.
-
-`ConfigurationDirectory=` creates configuration directories below `/etc` for system services or `$XDG_CONFIG_HOME` for user services and exports their paths through `CONFIGURATION_DIRECTORY`; `RuntimeDirectory=`, `StateDirectory=`, `CacheDirectory=`, and `LogsDirectory=` provide the matching managed directory environment variables. Set `FRACTALD_CONFIGURATION_DIRECTORY_ROOT` to override the configuration root. Set `FRACTALD_CGROUP_ROOT` to a writable cgroup v2 hierarchy to place every launched service in `fractald/<unit>` groups. `Service` `Slice=` values create the matching slice hierarchy below that root, including template specifiers such as `user-%i.slice`; `MemoryMax`, `CPUWeight`, and `TasksMax` in systemd service files configure the corresponding controllers. Without that environment variable, resource directives and explicit slices use `/sys/fs/cgroup` when the manager has permission.
-
-`Type=dbus` services must declare `BusName=`. FractalD keeps them in startup until the manager observes the configured name owned on the system bus, or on the user bus for a non-root manager with a session address; `ExecStartPost` runs after that readiness transition. Readiness probes run in the manager’s namespace so service IPC isolation does not hide the bus. The packaged D-Bus client provides the `dbus-send` probe used for this compatibility path.
-
-The compatibility binary is named `systemctl` when installed with FractalD. It forwards common package operations to FractalD while keeping the native `fractalctl` interface available for direct administration. `systemd-notify` is installed alongside the control tools and sends `READY=1`, `STATUS=`, `WATCHDOG=1`, `RELOADING=1`, `STOPPING=1`, `MAINPID=`, and custom notification fields through `NOTIFY_SOCKET`, including filesystem and Linux abstract sockets. `systemd-tmpfiles` handles common `d`, `D`, `e`, `v`, `q`, `Q`, `f`, `F`, `w`, `L`, `C`, `p`, `r`, `R`, `z`, and `Z` rules, alternate roots, prefixes, boot-only rules, dry runs, cleaning, removal, and purge operations. `systemctl start`, `stop`, `restart`, `isolate`, `reload-or-restart`, and `enable/disable --now` wait for the requested stable state by default; `--no-block` returns after the request is accepted. `preset` and `preset-all` apply standard systemd preset files, including first-match wildcard policy, `ignore`, template instances, and `--preset-mode=enable-only` or `disable-only`. `set-property UNIT Markers=+needs-restart` and `Markers=+needs-reload` support package update markers, and `reload-or-restart --marked` performs the requested reload or restart and clears completed markers. `mask`, `unmask`, `is-failed`, wildcard `list-units` queries, state-aware `list-unit-files`, `is-system-running`, and `show -p PROPERTY --value` for lifecycle properties are supported for package scripts. `reset-failed` clears failed state for one unit or all loaded units. `poweroff`, `reboot`, and `halt` request an ordered manager shutdown and perform the kernel power action only when FractalD is PID 1. Accepted lifecycle responses include a transaction ID; query one with `fractalctl transaction-status ID` to distinguish pending, completed, failed, and unknown work.
-
-The optional `fractald-resolved` binary is installed with the package and can be enabled as `fractald-resolved.service`. It reads `FRACTALD_RESOLVED_UPSTREAM` or the nameservers in `FRACTALD_RESOLV_CONF`, and listens on `FRACTALD_RESOLVED_LISTEN` (`127.0.0.53:53` by default). `FRACTALD_RESOLVED_TIMEOUT_MS` and `FRACTALD_RESOLVED_CACHE_ENTRIES` bound forwarding behavior; `FRACTALD_RESOLVED_FAULT=drop`, `servfail`, or `delay:MILLISECONDS` provides deterministic outage testing. `make nss` builds the optional `libnss_fractald.so.2` forward and reverse lookup module; set `NSSLIBDIR` for a distribution’s NSS library directory and add `fractald` to the `hosts` line in `nsswitch.conf` when enabling it.
-
-The package also provides `systemd-sysusers`. It consumes standard `sysusers.d` files used by Linux package scripts, creates system accounts and groups without delegating to a systemd manager, and supports alternate roots, replacement or inline package input, dry runs, configuration inspection, dynamic ID ranges, and group membership records.
-
-`systemd-sysctl` applies the ordered `sysctl.d` rules used by package and boot scripts, including administrator overrides, ignored failures, wildcard interface keys, alternate roots, prefixes, strict validation, and dry-run inspection.
-
-`systemd-update-helper` provides package transaction operations for unit enablement, restart and reload markers, and user-manager reexec compatibility without requiring systemd to be running.
-
-`systemd-machine-id-setup`, `systemd-detect-virt`, and `systemd-analyze` cover common package setup, virtualization conditionals, configuration inspection, and typed unit verification. `systemctl daemon-reexec` remains a successful no-op because FractalD owns its manager process directly.
-`kernel-install` handles BLS kernel and initrd transactions independently of a systemd manager, including alternate-root test images and administrator install hooks.
-`udevadm` supplies native trigger, device-property, settle, rules-control, and hwdb-update compatibility operations. The same binary provides a small kernel-uevent listener when invoked as `systemd-udevd`; its sysfs, queue, and runtime roots can be isolated for image tests.
-
-`FailureAction=` and `SuccessAction=` are handled by FractalD's native supervisor. A newly failed unit or successfully completed service can request an exit, halt, poweroff, or reboot family action; FractalD finishes its own ordered service shutdown before invoking the Linux power operation when it is PID 1.
-
-`JobTimeoutSec=` bounds a pending start transaction, including dependency and
-conflict waits. FractalD rolls back services started by an expired transaction,
-records the requested unit as failed, and applies `JobTimeoutAction=` through
-the same native PID1 shutdown path.
-
-The built-in dynamics are available through `fractald chaos`: Lorenz, Mandelbrot, Lyapunov, Rössler, the logistic map, and the Duffing oscillator. They form the basis for policy simulation, restart behavior experiments, and future observability signals.
-
-RustyBox is built as an independent toolbox for rescue and initramfs images. It provides the same six dynamics through `rustybox chaos` and supplies the low-level filesystem, process, mount, and swap applets FractalD can select with `FRACTALD_TOOLBOX_DIR` or `FRACTALD_RUSTYBOX`. The toolbox is opt-in for FractalD-owned helpers and does not rewrite package service commands. See `docs/RUSTYBOX.md` for its current applet contract.
-
-Calendar expressions are evaluated in UTC using the manager’s monotonic polling loop. The parser accepts aliases such as `hourly`, `daily`, `weekly`, `monthly`, and `yearly`, weekday/date fields, wildcards, ranges, lists, and stepped clock fields. Unsupported calendar syntax remains harmless and does not start a service.
-
-The optional Chaos check requires the `chaos` compiler in `PATH`:
-
-```sh
-make chaos-check
-```
-
-Cgroup v2 service limits include `MemoryMax`, `MemoryHigh`, `MemoryMin`, `MemoryLow`, `MemorySwapMax`, `CPUWeight`, `CPUQuota`, `CPUQuotaPeriodSec`, `IOWeight`, and `TasksMax`. `CPUQuota` is translated to the cgroup v2 `cpu.max` quota and period, with fractional percentages preserved to microsecond precision. `OOMPolicy=continue`, `stop`, or `kill` watches the service cgroup's `memory.events` counter and applies the selected action to the complete group. The manager writes only the controllers requested by a unit and removes the per-unit group after teardown. `CapabilityBoundingSet` validates Linux capability names, drops the child bounding set before identity changes, and applies the permitted, effective, and inheritable masks after the service identity is established. `AmbientCapabilities` preserves requested capabilities through a configured user change and raises them in the child before `NoNewPrivileges` and seccomp policy. `RestrictAddressFamilies` installs a seccomp filter for `socket(2)` and `socketpair(2)`. `SystemCallFilter` expands the standard systemd syscall groups and installs allow or deny seccomp rules with `SystemCallErrorNumber` and per-call errno overrides; `SystemCallArchitectures=native` or `x86-64` pins the filter to the host ABI. `RestrictSUIDSGID=yes` keeps ordinary mode changes available while rejecting chmod-family calls that set SUID or SGID bits. `RestrictNamespaces` masks namespace creation and switching by inspecting `clone(2)`, `unshare(2)`, `clone3(2)`, and `setns(2)` flags. `ProtectKernelTunables=yes` makes kernel control trees read-only and hides `/proc/kallsyms` and `/proc/kcore`. `ProtectClock=yes` removes `CAP_SYS_TIME` where present and rejects clock mutation syscalls. `ProtectProc=invisible` and `ProcSubset=pid` mount a filtered procfs view when the kernel supports those options. `PrivateDevices=yes` creates a private `/dev` with the standard null, zero, full, random, urandom, and tty devices plus isolated `devpts` and shared memory. `ProtectControlGroups`, `ProtectKernelModules`, and `ProtectKernelLogs` add read-only or inaccessible mounts for the matching kernel interfaces inside the child mount namespace. `ProtectHostname` creates a private UTS namespace, blocks hostname syscalls with a seccomp filter, and hides hostname metadata files. `LockPersonality` denies later `personality(2)` calls. `StartLimitIntervalSec=` and `StartLimitBurst=` prevent a faulty unit from consuming an unbounded restart loop; `reset-failed` clears the accumulated attempts.
-
-The optional fractald-resolved process publishes its actual UDP listener, Unix control socket, PID, upstreams, and cache limits in an atomic runtime discovery record. resolvectl and its systemd-resolve alias consume that record for status, DNS queries, statistics, cache flushing, and upstream updates without changing the host resolver configuration.
-
-The journalctl compatibility client reads the manager’s per-unit journal sink, supports unit filters, line limits, follow mode, grep filters, rotation listing, and disk usage. systemd-cat writes command output or stdin into the same local sink and can also forward to the native journal socket when `FRACTALD_JOURNAL_SOCKET` is set. The packaged `systemd-journald` endpoint receives those datagrams, consumes all inherited socket activation descriptors, and writes the same sink without a systemd manager.
-
-The `systemd-escape` compatibility utility encodes unit-safe names, path names, template instances, and reverse conversions for package scripts and generated units.
-
-## Design priorities
-
-1. A service has one authoritative state machine and every asynchronous event carries enough identity to reject stale events.
-2. Process identity is tracked with pidfds where the kernel supports them, avoiding PID reuse races.
-3. Native service execution does not require a shell. Shell based compatibility belongs in an adapter with explicit boundaries.
-4. Configuration and control are separate from process execution so a failed adapter cannot corrupt supervisor state.
-5. Recovery behavior is bounded, observable, and deterministic under repeated failures. State changes are flushed to a bounded event log, and directly managed children receive a parent-death signal so a manager crash does not leave them running unattended.
-
-Compatibility work keeps systemd units and OpenRC scripts on separate adapters while sending both into the same Rust lifecycle engine. A resolver ships in the same distribution package as FractalD while remaining a separately supervised process. Each compatibility surface has focused conformance tests. `NotifyAccess=none`, `main`, `exec`, and `all` are enforced from datagram sender credentials, with cgroup membership or process-group fallback for `all`. `RequiresMountsFor=` adds path-derived mount dependencies, `DefaultDependencies=` adds standard type-specific ordering when its target units are loaded, and `StopWhenUnneeded=` reclaims dependency-only units after their active consumers stop. Slice units, synthetic device wait units, socket associations, and eager automount compatibility transactions are supported; native lazy autofs behavior, native journal querying and retention, broader namespace features, and additional package integration coverage remain planned work.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the boot and supervision
+model and [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the descriptor
+reference.

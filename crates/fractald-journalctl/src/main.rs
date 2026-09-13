@@ -178,7 +178,11 @@ fn journal_files(directory: &Path, units: &[String]) -> io::Result<Vec<JournalFi
         } else {
             continue;
         };
-        if !units.is_empty() && !units.iter().any(|value| value == unit) {
+        if !units.is_empty()
+            && !units
+                .iter()
+                .any(|value| value == unit || value.strip_suffix(".svc").unwrap_or(value) == unit)
+        {
             continue;
         }
         files.push(JournalFile {
@@ -294,8 +298,8 @@ mod tests {
             std::env::temp_dir().join(format!("fractald-journal-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("journal directory");
-        fs::write(root.join("demo.service.stdout.log.1"), "old\n").expect("old log");
-        fs::write(root.join("demo.service.stdout.log"), "new\n").expect("new log");
+        fs::write(root.join("demo.svc.stdout.log.1"), "old\n").expect("old log");
+        fs::write(root.join("demo.svc.stdout.log"), "new\n").expect("new log");
         let files = journal_files(&root, &[]).expect("journal files");
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].generation, 0);
@@ -309,12 +313,8 @@ mod tests {
             std::env::temp_dir().join(format!("fractald-journal-lines-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("journal directory");
-        fs::write(
-            root.join("demo.service.stdout.log"),
-            "first\nsecond\nthird\n",
-        )
-        .expect("log");
-        let mut lines = read_lines(&root, &["demo.service".to_owned()]).expect("lines");
+        fs::write(root.join("demo.svc.stdout.log"), "first\nsecond\nthird\n").expect("log");
+        let mut lines = read_lines(&root, &["demo.svc".to_owned()]).expect("lines");
         lines.retain(|line| line.contains("second") || line.contains("third"));
         assert_eq!(lines.len(), 2);
         fs::remove_dir_all(root).expect("cleanup");

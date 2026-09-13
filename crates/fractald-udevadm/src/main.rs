@@ -49,7 +49,7 @@ fn run(program: &str, arguments: Vec<String>) -> Result<(), String> {
     if Path::new(program)
         .file_name()
         .and_then(|value| value.to_str())
-        == Some("systemd-udevd")
+        == Some("fractald-udevd")
     {
         return udevd(&arguments);
     }
@@ -89,12 +89,12 @@ fn udevd(arguments: &[String]) -> Result<(), String> {
             "--debug" | "-d" => debug = true,
             "--help" | "-h" => {
                 println!(
-                    "systemd-udevd (FractalD)\n\nUsage: systemd-udevd [--daemon|--foreground] [--debug]\n\nListens for kernel uevents and maintains the FractalD device-event queue."
+                    "fractald-udevd (FractalD)\n\nUsage: fractald-udevd [--daemon|--foreground] [--debug]\n\nListens for kernel uevents and maintains the FractalD device-event queue."
                 );
                 return Ok(());
             }
             "--version" => {
-                println!("systemd-udevd (FractalD) {}", env!("CARGO_PKG_VERSION"));
+                println!("fractald-udevd (FractalD) {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             value if value.starts_with("--children-max=") || value.starts_with("--timeout=") => {}
@@ -114,7 +114,7 @@ fn udevd(arguments: &[String]) -> Result<(), String> {
 
     let socket = open_uevent_socket()?;
     if debug {
-        eprintln!("systemd-udevd: listening for kernel uevents");
+        eprintln!("fractald-udevd: listening for kernel uevents");
     }
     let mut buffer = vec![0_u8; 64 * 1024];
     let mut sequence = 0_u64;
@@ -142,7 +142,7 @@ fn udevd(arguments: &[String]) -> Result<(), String> {
                 .get("DEVPATH")
                 .map(String::as_str)
                 .unwrap_or("unknown");
-            eprintln!("systemd-udevd: {action} {devpath}");
+            eprintln!("fractald-udevd: {action} {devpath}");
         }
         fs::remove_file(&marker)
             .map_err(|error| format!("cannot remove {}: {error}", marker.display()))?;
@@ -281,7 +281,7 @@ fn hwdb(arguments: &[String]) -> Result<(), String> {
     if !update {
         return Err("hwdb: only --update is supported".to_owned());
     }
-    // FractalD does not require the opaque systemd-udev hwdb.bin format.
+    // FractalD does not require the opaque fractald-udev hwdb.bin format.
     // Validate the text rule directories so package transactions still get
     // a deterministic result without spawning a competing daemon.
     for directory in [

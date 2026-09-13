@@ -12,5 +12,5 @@ fractald-control = { path = "../fractald-control" }
 fractald-platform = { path = "../fractald-platform" }
 
 [[bin]]
-name = "systemd-notify"
+name = "fractald-notify"
 path = "src/main.rs"

@@ -1,0 +1,10 @@
+[service]
+description=FractalD native journal receiver
+kind=simple
+exec=/usr/bin/fractald-journald --system
+restart=on-failure
+stdout=inherit
+stderr=inherit
+
+[install]
+profile=boot

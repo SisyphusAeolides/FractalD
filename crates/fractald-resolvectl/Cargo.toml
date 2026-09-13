@@ -11,5 +11,5 @@ workspace = true
 fractald-resolver = { path = "../fractald-resolver" }
 
 [[bin]]
-name = "resolvectl"
+name = "fractald-resolvectl"
 path = "src/main.rs"

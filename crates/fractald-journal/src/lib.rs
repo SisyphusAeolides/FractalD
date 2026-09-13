@@ -14,7 +14,7 @@ impl NativeJournal {
     pub fn connect() -> Option<Self> {
         let endpoint = env::var_os("FRACTALD_JOURNAL_SOCKET")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/run/systemd/journal/socket"));
+            .unwrap_or_else(|| PathBuf::from("/run/fractald/journal/socket"));
         let socket = UnixDatagram::unbound().ok()?;
         if endpoint.as_os_str().as_bytes().first() == Some(&b'@') {
             let address =
@@ -42,7 +42,7 @@ pub fn encode_entry(unit: &str, stream: &str, pid: u32, message: &[u8]) -> Vec<u
     let mut payload = Vec::with_capacity(message.len() + unit.len() + stream.len() + 80);
     payload.extend_from_slice(b"MESSAGE=");
     payload.extend_from_slice(&message);
-    payload.extend_from_slice(b"\n_SYSTEMD_UNIT=");
+    payload.extend_from_slice(b"\nFRACTALD_SERVICE=");
     payload.extend_from_slice(unit.as_bytes());
     payload.extend_from_slice(b"\n_PID=");
     payload.extend_from_slice(pid.to_string().as_bytes());
@@ -58,11 +58,11 @@ mod tests {
 
     #[test]
     fn encodes_identity_and_sanitizes_message_boundaries() {
-        let payload = encode_entry("example.service", "stderr", 1234, b"hello\0world\n");
+        let payload = encode_entry("example.svc", "stderr", 1234, b"hello\0world\n");
         let payload = String::from_utf8(payload).expect("payload");
         assert_eq!(
             payload,
-            "MESSAGE=helloworld\n_SYSTEMD_UNIT=example.service\n_PID=1234\n_STREAM=stderr\n_TRANSPORT=stdout\n"
+            "MESSAGE=helloworld\nFRACTALD_SERVICE=example.svc\n_PID=1234\n_STREAM=stderr\n_TRANSPORT=stdout\n"
         );
     }
 

@@ -1,0 +1,12 @@
+[service]
+description=FractalD native boot profile
+kind=group
+remain_after_exit=true
+
+[dependencies]
+wants=fractald-journald fractald-udevd storage
+after=fractald-journald fractald-udevd storage
+
+[install]
+profile=boot
+allow_isolate=true

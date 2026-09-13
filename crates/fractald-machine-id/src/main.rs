@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     match run(env::args().skip(1)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("systemd-machine-id-setup: {error}");
+            eprintln!("fractald-machine-id: {error}");
             ExitCode::from(1)
         }
     }
@@ -40,7 +40,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             return Ok(());
         } else if argument == "--version" {
             println!(
-                "systemd-machine-id-setup (FractalD) {}",
+                "fractald-machine-id (FractalD) {}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -60,7 +60,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     if commit {
         // FractalD writes a persistent machine ID directly. There is no
-        // transient systemd machine-id store that needs a second commit.
+        // transient machine-id store that needs a second commit.
     }
     Ok(())
 }
@@ -117,7 +117,7 @@ fn valid_machine_id(value: &str) -> bool {
 
 fn print_help() {
     println!(
-        "systemd-machine-id-setup (FractalD)\n\nUsage: systemd-machine-id-setup [OPTIONS]\n\n  --root=PATH  initialize an alternate filesystem root\n  --print      print the resulting machine ID\n  --commit     accept the transient-ID commit operation\n  --version    show the version\n  --help       show this help"
+        "fractald-machine-id (FractalD)\n\nUsage: fractald-machine-id [OPTIONS]\n\n  --root=PATH  initialize an alternate filesystem root\n  --print      print the resulting machine ID\n  --commit     accept the transient-ID commit operation\n  --version    show the version\n  --help       show this help"
     );
 }
 

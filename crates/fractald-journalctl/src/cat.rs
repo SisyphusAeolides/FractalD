@@ -10,26 +10,26 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("systemd-cat: {error}");
+            eprintln!("fractald-cat: {error}");
             ExitCode::from(1)
         }
     }
 }
 
 fn run() -> Result<u8, String> {
-    let mut tag = env::var("FRACTALD_JOURNAL_UNIT").unwrap_or_else(|_| "systemd-cat".to_owned());
+    let mut tag = env::var("FRACTALD_JOURNAL_UNIT").unwrap_or_else(|_| "fractald-cat".to_owned());
     let mut command = Vec::new();
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "systemd-cat (FractalD)\n\nusage: systemd-cat [-t TAG] [COMMAND [ARGUMENT...]]"
+                    "fractald-cat (FractalD)\n\nusage: fractald-cat [-t TAG] [COMMAND [ARGUMENT...]]"
                 );
                 return Ok(0);
             }
             "--version" => {
-                println!("systemd-cat (FractalD) 0.1.0");
+                println!("fractald-cat (FractalD) 0.1.0");
                 return Ok(0);
             }
             "-t" | "--identifier" => {

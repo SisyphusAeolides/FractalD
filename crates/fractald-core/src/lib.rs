@@ -195,15 +195,15 @@ pub struct CommandSpec {
     pub args: Vec<OsString>,
     /// Ignore a non-zero exit status for this command.
     ///
-    /// This is the semantic equivalent of systemd's `-` command prefix.
+    /// A leading marker in a native command line can request this behavior.
     pub ignore_failure: bool,
     /// Use the first argument as argv[0] when the command is launched.
     ///
-    /// This is the semantic equivalent of systemd's `@` command prefix.
+    /// Use the configured first argument as the launched program name.
     pub argv0: Option<OsString>,
     /// Keep environment variables in the command arguments literal.
     ///
-    /// This is the semantic equivalent of systemd's `:` command prefix.
+    /// Keep environment expressions literal when this is disabled.
     pub expand_environment: bool,
 }
 
@@ -481,11 +481,13 @@ pub struct DirectorySpec {
 pub struct ServiceSpec {
     pub name: String,
     pub aliases: BTreeSet<String>,
-    /// Whether systemd-style type default dependencies should be synthesized.
+    /// Boot or administrator selected profiles that may activate this service.
+    pub profiles: BTreeSet<String>,
+    /// Whether FractalD should synthesize the native default dependencies.
     pub default_dependencies: bool,
-    /// Whether this unit may be the root of an isolation transaction.
+    /// Whether this service may be the root of an isolation transaction.
     pub allow_isolate: bool,
-    /// Keep this unit active when another target is isolated.
+    /// Keep this service active when another profile is isolated.
     pub ignore_on_isolate: bool,
     pub refuse_manual_start: bool,
     pub refuse_manual_stop: bool,
@@ -516,7 +518,7 @@ pub struct ServiceSpec {
     pub restart_prevent_exit_status: BTreeSet<i32>,
     pub restart: RestartPolicy,
     pub restart_limit: u32,
-    /// Optional systemd-compatible sliding-window start rate limit.
+    /// Optional sliding-window start rate limit.
     pub start_limit_interval: Option<Duration>,
     pub start_limit_burst: Option<u32>,
     pub start_timeout: Duration,
@@ -550,7 +552,7 @@ pub struct ServiceSpec {
     pub mount_where: Option<PathBuf>,
     /// The declared kernel filesystem type for a mount unit, when present.
     pub mount_filesystem: Option<String>,
-    /// The kernel device path represented by a synthetic `.device` unit.
+    /// The kernel device path represented by a native `device-*` service.
     pub device_path: Option<PathBuf>,
     pub service_type: ServiceType,
     pub bus_names: Vec<String>,
@@ -624,6 +626,7 @@ impl ServiceSpec {
         Self {
             name: name.into(),
             aliases: BTreeSet::new(),
+            profiles: BTreeSet::new(),
             default_dependencies: true,
             allow_isolate: false,
             ignore_on_isolate: false,
@@ -867,19 +870,10 @@ impl ServiceSpec {
 
 fn expand_mount_path(path: &std::path::Path, spec: &ServiceSpec) -> PathBuf {
     let value = path.to_string_lossy();
-    let unit_stem = spec
-        .name
-        .strip_suffix(".service")
-        .or_else(|| spec.name.strip_suffix(".target"))
-        .or_else(|| spec.name.strip_suffix(".socket"))
-        .or_else(|| spec.name.strip_suffix(".timer"))
-        .or_else(|| spec.name.strip_suffix(".path"))
-        .or_else(|| spec.name.strip_suffix(".mount"))
-        .or_else(|| spec.name.strip_suffix(".swap"))
-        .unwrap_or(&spec.name);
-    let (prefix, instance) = match unit_stem.rsplit_once('@') {
+    let service_stem = spec.name.strip_suffix(".svc").unwrap_or(&spec.name);
+    let (prefix, instance) = match service_stem.rsplit_once('@') {
         Some((prefix, instance)) => (prefix, Some(instance)),
-        None => (unit_stem, None),
+        None => (service_stem, None),
     };
     let runtime = env::var_os("FRACTALD_RUNTIME_DIR")
         .or_else(|| env::var_os("XDG_RUNTIME_DIR"))
@@ -909,7 +903,7 @@ fn expand_mount_path(path: &std::path::Path, spec: &ServiceSpec) -> PathBuf {
         }
         let replacement = match specifier {
             'n' => Some(spec.name.clone()),
-            'N' => Some(unit_stem.to_owned()),
+            'N' => Some(service_stem.to_owned()),
             'p' | 'P' => Some(prefix.to_owned()),
             'i' | 'I' | 'f' => Some(instance.unwrap_or_default().to_owned()),
             't' => Some(runtime.to_string_lossy().into_owned()),

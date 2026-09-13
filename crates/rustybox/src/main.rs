@@ -2162,7 +2162,7 @@ mod tests {
         assert_eq!(flags, MS_RDONLY | MS_NOSUID | MS_RELATIME);
 
         let (data, flags) = parse_mount_options(
-            "nofail,_netdev,x-systemd.device-timeout=5s,comment=optional,ro,umask=0077",
+            "nofail,_netdev,x-fractald.device-timeout=5s,comment=optional,ro,umask=0077",
         )
         .expect("fstab metadata");
         assert_eq!(data, "umask=0077");

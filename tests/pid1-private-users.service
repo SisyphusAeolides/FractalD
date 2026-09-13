@@ -1,8 +1,0 @@
-[Unit]
-Description=FractalD direct PID1 private users check
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/libexec/fractald-pid1-test/private-users
-PrivateUsers=yes
-RemainAfterExit=yes

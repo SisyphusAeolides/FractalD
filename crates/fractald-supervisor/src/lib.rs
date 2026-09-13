@@ -212,7 +212,11 @@ impl Supervisor {
 
     pub fn add(&mut self, spec: ServiceSpec) -> Result<(), SupervisorError> {
         let name = spec.name.clone();
-        let aliases = spec.aliases.clone();
+        let aliases = spec
+            .aliases
+            .iter()
+            .map(|alias| alias.strip_suffix(".svc").unwrap_or(alias).to_owned())
+            .collect::<BTreeSet<_>>();
         let identity = if spec.dynamic_user {
             Some(allocate_dynamic_identity(&name, &self.dynamic_user_ids())?)
         } else {
@@ -258,23 +262,20 @@ impl Supervisor {
         if let Some(canonical) = self.aliases.get(name) {
             return Some(canonical.as_str());
         }
-        if !name.contains('.') {
-            for suffix in [
-                ".service", ".target", ".socket", ".timer", ".path", ".mount", ".swap",
-            ] {
-                let candidate = format!("{name}{suffix}");
-                if self.services.contains_key(&candidate) {
-                    return self
-                        .services
-                        .get_key_value(&candidate)
-                        .map(|(name, _)| name.as_str());
-                }
-                if let Some(canonical) = self.aliases.get(&candidate) {
-                    return Some(canonical.as_str());
-                }
-            }
+        let name = name.strip_suffix(".svc").unwrap_or(name);
+        if self.services.contains_key(name) {
+            return self
+                .services
+                .get_key_value(name)
+                .map(|(name, _)| name.as_str());
         }
-        None
+        if let Some(canonical) = self.aliases.get(name) {
+            return Some(canonical.as_str());
+        }
+        self.services
+            .keys()
+            .find(|candidate| candidate.strip_suffix(".svc") == Some(name))
+            .map(String::as_str)
     }
 
     pub fn specification(&self, name: &str) -> Option<&ServiceSpec> {
@@ -403,14 +404,9 @@ impl Supervisor {
         let Some(service) = self.services.get(&name) else {
             return Err(SupervisorError::new(format!("unknown service {name}")));
         };
-        if !name.ends_with(".target") {
-            return Err(SupervisorError::new(format!(
-                "isolation requires a target unit: {name}"
-            )));
-        }
         if !service.spec().allow_isolate {
             return Err(SupervisorError::new(format!(
-                "target {name} does not allow isolation"
+                "service profile {name} does not allow isolation"
             )));
         }
 
@@ -545,6 +541,17 @@ impl Supervisor {
         self.stop_dependents(&name, true, now)
     }
 
+    /// Stop a service while replacing its native descriptor during a manager
+    /// reload.  Configuration changes are manager initiated, so a descriptor
+    /// cannot block its own replacement with a manual-stop refusal.
+    pub fn stop_for_reconfigure(&mut self, name: &str) -> Result<(), SupervisorError> {
+        let name = self.canonical_name(name);
+        self.cancel_start_jobs(&name)?;
+        let now = Instant::now();
+        self.service_mut(&name)?.stop(now)?;
+        self.stop_dependents(&name, true, now)
+    }
+
     pub fn restart(&mut self, name: &str) -> Result<(), SupervisorError> {
         let name = self.canonical_name(name);
         self.refresh_lost_mount(&name)?;
@@ -646,6 +653,12 @@ impl Supervisor {
 
     pub fn is_stopped(&self) -> bool {
         self.start_jobs.is_empty() && self.services.values().all(ManagedService::is_stopped)
+    }
+
+    pub fn service_is_stopped(&self, name: &str) -> Option<bool> {
+        self.resolve_name(name)
+            .and_then(|name| self.services.get(name))
+            .map(ManagedService::is_stopped)
     }
 
     pub fn reap_untracked_children(&self) -> Result<usize, SupervisorError> {
@@ -1419,7 +1432,7 @@ fn collect_aliases(
     Ok(aliases)
 }
 
-// Keep dynamic identities in the range reserved by systemd for transient
+// Keep dynamic identities in FractalD's transient
 // users.  FractalD does not edit passwd or group databases; children receive
 // the numeric identity directly and the supervisor reserves it for the life
 // of the loaded unit set.
@@ -2807,13 +2820,13 @@ impl ManagedService {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         apply_unset_environment(&mut command, &spec);
-        command.env_remove("NOTIFY_SOCKET");
+        command.env_remove("FRACTALD_NOTIFY_SOCKET");
         if let Some(path) = self.notify_path.as_ref() {
-            command.env("NOTIFY_SOCKET", path);
+            command.env("FRACTALD_NOTIFY_SOCKET", path);
         }
         if let Some(watchdog) = spec.watchdog {
             command.env(
-                "WATCHDOG_USEC",
+                "FRACTALD_WATCHDOG_USEC",
                 watchdog.as_micros().min(u64::MAX as u128).to_string(),
             );
         }
@@ -3642,11 +3655,11 @@ impl ManagedService {
             command.env("LISTEN_FDNAMES", activation_fd_names.join(":"));
         }
         if let Some((_, path)) = notify.as_ref() {
-            command.env("NOTIFY_SOCKET", path);
+            command.env("FRACTALD_NOTIFY_SOCKET", path);
         }
         if let Some(watchdog) = spec.watchdog {
             command.env(
-                "WATCHDOG_USEC",
+                "FRACTALD_WATCHDOG_USEC",
                 watchdog.as_micros().min(u64::MAX as u128).to_string(),
             );
         }
@@ -5148,18 +5161,10 @@ fn expand_specifiers(argument: &OsStr, spec: &ServiceSpec) -> OsString {
 
 fn service_specifier(specifier: char, spec: &ServiceSpec) -> Option<String> {
     let name = &spec.name;
-    let unit_stem = name
-        .strip_suffix(".service")
-        .or_else(|| name.strip_suffix(".target"))
-        .or_else(|| name.strip_suffix(".socket"))
-        .or_else(|| name.strip_suffix(".timer"))
-        .or_else(|| name.strip_suffix(".path"))
-        .or_else(|| name.strip_suffix(".mount"))
-        .or_else(|| name.strip_suffix(".swap"))
-        .unwrap_or(name);
-    let (prefix, instance) = match unit_stem.rsplit_once('@') {
+    let service_stem = name.strip_suffix(".svc").unwrap_or(name);
+    let (prefix, instance) = match service_stem.rsplit_once('@') {
         Some((prefix, instance)) => (prefix, Some(instance)),
-        None => (unit_stem, None),
+        None => (service_stem, None),
     };
     let runtime = env::var_os("FRACTALD_RUNTIME_DIR")
         .or_else(|| env::var_os("XDG_RUNTIME_DIR"))
@@ -5179,7 +5184,7 @@ fn service_specifier(specifier: char, spec: &ServiceSpec) -> Option<String> {
         .unwrap_or_else(|| PathBuf::from("/root"));
     let value = match specifier {
         'n' => name.clone(),
-        'N' => unit_stem.to_owned(),
+        'N' => service_stem.to_owned(),
         'p' | 'P' => prefix.to_owned(),
         'i' | 'I' => instance.unwrap_or_default().to_owned(),
         'f' => instance.unwrap_or_default().to_owned(),
@@ -6016,7 +6021,7 @@ fn credential_import_dirs() -> Vec<PathBuf> {
     }
     [
         "/run/credentials/@system",
-        "/run/systemd/credentials",
+        "/run/fractald/credentials",
         "/etc/credstore",
         "/run/credstore",
         "/usr/lib/credstore",
@@ -8054,7 +8059,7 @@ fn kernel_command_line_contains(argument: &str) -> bool {
 }
 
 fn detect_container() -> Option<String> {
-    if let Ok(value) = fs::read_to_string("/run/systemd/container") {
+    if let Ok(value) = fs::read_to_string("/run/fractald/container") {
         let value = value.trim().to_ascii_lowercase();
         if !value.is_empty() {
             return Some(value);
@@ -8271,7 +8276,7 @@ fn credential_available(spec: &ServiceSpec, credential: &str) -> bool {
         PathBuf::from("/run/credentials")
             .join(&spec.name)
             .join(credential),
-        PathBuf::from("/run/systemd/credentials")
+        PathBuf::from("/run/fractald/credentials")
             .join(&spec.name)
             .join(credential),
     ]
@@ -8854,24 +8859,23 @@ mod tests {
     }
 
     #[test]
-    fn isolation_requires_an_allowed_target_unit() {
+    fn isolation_requires_an_allowed_profile_service() {
         let mut supervisor = Supervisor::new();
-        let mut target = service("ordinary.target", "/bin/true", &[]);
+        let mut target = service("ordinary.profile", "/bin/true", &[]);
         target.service_type = ServiceType::Oneshot;
         target.remain_after_exit = true;
         supervisor.add(target).expect("add target");
         let error = supervisor
-            .isolate("ordinary.target")
+            .isolate("ordinary.profile")
             .expect_err("target without AllowIsolate must fail");
         assert!(error.to_string().contains("does not allow isolation"));
 
-        let mut service = service("ordinary.service", "/bin/true", &[]);
-        service.allow_isolate = true;
+        let service = service("ordinary.svc", "/bin/true", &[]);
         supervisor.add(service).expect("add service");
         let error = supervisor
-            .isolate("ordinary.service")
-            .expect_err("isolation of a service must fail");
-        assert!(error.to_string().contains("requires a target unit"));
+            .isolate("ordinary.svc")
+            .expect_err("isolation without permission must fail");
+        assert!(error.to_string().contains("does not allow isolation"));
     }
 
     #[test]
@@ -8954,23 +8958,17 @@ mod tests {
     #[test]
     fn resolves_declared_service_aliases_through_lifecycle_operations() {
         let mut supervisor = Supervisor::new();
-        let mut spec = service("worker.service", "/bin/sh", &["-c", "sleep 30"]);
-        spec.aliases.insert("worker-alias.service".to_owned());
+        let mut spec = service("worker.svc", "/bin/sh", &["-c", "sleep 30"]);
+        spec.aliases.insert("worker-alias.svc".to_owned());
         spec.aliases.insert("worker-short".to_owned());
         supervisor.add(spec).expect("add aliased service");
 
         assert_eq!(
-            supervisor.resolve_name("worker-alias.service"),
-            Some("worker.service")
+            supervisor.resolve_name("worker-alias.svc"),
+            Some("worker.svc")
         );
-        assert_eq!(
-            supervisor.resolve_name("worker-short"),
-            Some("worker.service")
-        );
-        assert_eq!(
-            supervisor.resolve_name("worker-alias"),
-            Some("worker.service")
-        );
+        assert_eq!(supervisor.resolve_name("worker-short"), Some("worker.svc"));
+        assert_eq!(supervisor.resolve_name("worker-alias"), Some("worker.svc"));
 
         supervisor
             .start("worker-alias")
@@ -8983,7 +8981,7 @@ mod tests {
             ServiceState::Running
         );
         supervisor
-            .stop("worker-alias.service")
+            .stop("worker-alias.svc")
             .expect("stop through alias");
         poll_until(&mut supervisor, Supervisor::is_stopped);
     }
@@ -9810,7 +9808,7 @@ mod tests {
             "/usr/bin/python3",
             &[
                 "-c",
-                "import os, socket, time; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b'READY=1\\nSTATUS=ready\\n', os.environ['NOTIFY_SOCKET']); time.sleep(30)",
+                "import os, socket, time; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b'READY=1\\nSTATUS=ready\\n', os.environ['FRACTALD_NOTIFY_SOCKET']); time.sleep(30)",
             ],
         );
         notify.service_type = ServiceType::Notify;
@@ -9890,7 +9888,7 @@ mod tests {
             "/usr/bin/python3",
             &[
                 "-c",
-                "import os, socket, time; assert os.environ['WATCHDOG_USEC'] == '20000'; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b'READY=1\\n', os.environ['NOTIFY_SOCKET']); time.sleep(30)",
+                "import os, socket, time; assert os.environ['FRACTALD_WATCHDOG_USEC'] == '20000'; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b'READY=1\\n', os.environ['FRACTALD_NOTIFY_SOCKET']); time.sleep(30)",
             ],
         );
         notify.service_type = ServiceType::Notify;
@@ -9994,17 +9992,17 @@ mod tests {
 
     #[test]
     fn cgroup_slice_paths_expand_template_instances() {
-        let mut spec = service("user@1000.service", "/bin/true", &[]);
+        let mut spec = service("user@1000.svc", "/bin/true", &[]);
         spec.cgroup_slice = Some("user-%i.slice".to_owned());
         assert_eq!(
             service_cgroup_path(Path::new("/tmp/fractald-cgroup"), &spec).expect("cgroup path"),
-            PathBuf::from("/tmp/fractald-cgroup/user.slice/user-1000.slice/user@1000.service")
+            PathBuf::from("/tmp/fractald-cgroup/user.slice/user-1000.slice/user@1000.svc")
         );
 
         spec.cgroup_slice = Some("-.slice".to_owned());
         assert_eq!(
             service_cgroup_path(Path::new("/tmp/fractald-cgroup"), &spec).expect("root slice path"),
-            PathBuf::from("/tmp/fractald-cgroup/user@1000.service")
+            PathBuf::from("/tmp/fractald-cgroup/user@1000.svc")
         );
     }
 
@@ -10887,14 +10885,14 @@ mod tests {
     #[test]
     fn formats_native_journal_entries_with_service_identity() {
         let payload = fractald_journal::encode_entry(
-            "journal-smoke.service",
+            "journal-smoke.svc",
             "stderr",
             4242,
             b"message with nul\0 and newline\n",
         );
         let payload = String::from_utf8(payload).expect("journal payload");
         assert!(payload.contains("MESSAGE=message with nul and newline"));
-        assert!(payload.contains("_SYSTEMD_UNIT=journal-smoke.service"));
+        assert!(payload.contains("FRACTALD_SERVICE=journal-smoke.svc"));
         assert!(payload.contains("_PID=4242"));
         assert!(payload.contains("STREAM=stderr"));
         assert!(payload.ends_with("_TRANSPORT=stdout\n"));

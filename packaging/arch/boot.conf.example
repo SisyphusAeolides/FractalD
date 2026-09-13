@@ -1,0 +1,3 @@
+# Select the native profile FractalD starts when it becomes PID1.
+profile=boot
+init=/usr/bin/fractald

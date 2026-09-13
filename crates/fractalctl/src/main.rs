@@ -2,16 +2,12 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use fractald_control::{
-    Request, Response, RuntimePaths, StatePaths, unit_file_directories, unit_file_is_enabled,
-    unit_file_is_masked,
-};
+use fractald_control::{Request, Response, RuntimePaths, StatePaths};
 
 const NOT_RUNNING: u8 = 3;
 const TRANSACTION_PENDING: u8 = 2;
@@ -152,22 +148,25 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<ParsedArgs, St
 }
 
 fn enable(now: bool) -> Result<u8, String> {
-    let boot = BootPaths::from_environment()?;
-    fs::create_dir_all(&boot.unit_directory)
-        .map_err(|error| format!("cannot create {}: {error}", boot.unit_directory.display()))?;
-    fs::create_dir_all(&boot.wants_directory)
-        .map_err(|error| format!("cannot create {}: {error}", boot.wants_directory.display()))?;
-    let unit = unit_contents(&boot)?;
-    write_if_changed(&boot.unit_file, unit.as_bytes())?;
-    ensure_enable_link(&boot)?;
-    println!("enabled FractalD at {}", boot.unit_file.display());
+    let state = StatePaths::from_environment();
+    state
+        .enable("boot")
+        .map_err(|error| format!("cannot enable the native boot profile: {error}"))?;
+    let path = boot_profile_path()?;
+    let contents = "profile=boot\ninit=/usr/bin/fractald\n";
+    write_if_changed(&path, contents.as_bytes())?;
+    println!(
+        "enabled the native FractalD PID1 profile at {}",
+        path.display()
+    );
     if now { start_daemon() } else { Ok(0) }
 }
 
 fn disable(now: bool) -> Result<u8, String> {
-    let boot = BootPaths::from_environment()?;
-    remove_enable_link(&boot)?;
-    println!("disabled FractalD at boot");
+    StatePaths::from_environment()
+        .disable("boot")
+        .map_err(|error| format!("cannot disable the native boot profile: {error}"))?;
+    println!("disabled the native FractalD PID1 profile");
     if now {
         stop_daemon().map(|code| if code == NOT_RUNNING { 0 } else { code })
     } else {
@@ -548,10 +547,6 @@ fn is_enabled(name: &str) -> Result<u8, String> {
     let masked = state
         .is_masked(name)
         .map_err(|error| format!("cannot inspect masked state for {name}: {error}"))?;
-    let directories = unit_file_directories();
-    let masked = masked
-        || unit_file_is_masked(&directories, name)
-            .map_err(|error| format!("cannot inspect unit mask for {name}: {error}"))?;
     if masked {
         println!("masked");
         return Ok(0);
@@ -559,9 +554,6 @@ fn is_enabled(name: &str) -> Result<u8, String> {
     let enabled = state
         .is_enabled(name)
         .map_err(|error| format!("cannot inspect enabled state for {name}: {error}"))?;
-    let enabled = enabled
-        || unit_file_is_enabled(&directories, name)
-            .map_err(|error| format!("cannot inspect unit enablement for {name}: {error}"))?;
     if enabled {
         println!("enabled");
         Ok(0)
@@ -740,55 +732,19 @@ fn is_not_running(error: &io::Error) -> bool {
     )
 }
 
-struct BootPaths {
-    unit_directory: PathBuf,
-    wants_directory: PathBuf,
-    unit_file: PathBuf,
-    enable_link: PathBuf,
-    target: String,
-}
-
-impl BootPaths {
-    fn from_environment() -> Result<Self, String> {
-        let (unit_directory, default_target) = if let Some(path) = env::var_os("FRACTALD_UNIT_DIR")
-        {
-            (PathBuf::from(path), "default.target".to_owned())
-        } else if fractald_platform::is_root() {
-            (
-                PathBuf::from("/etc/systemd/system"),
-                "multi-user.target".to_owned(),
-            )
-        } else {
-            let config_home = env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-                .ok_or_else(|| "HOME or XDG_CONFIG_HOME is required".to_owned())?;
-            (
-                config_home.join("systemd/user"),
-                "default.target".to_owned(),
-            )
-        };
-        let target = env::var("FRACTALD_BOOT_TARGET").unwrap_or(default_target);
-        let wants_directory = unit_directory.join(format!("{target}.wants"));
-        let unit_file = unit_directory.join("fractald.service");
-        let enable_link = wants_directory.join("fractald.service");
-        Ok(Self {
-            unit_directory,
-            wants_directory,
-            unit_file,
-            enable_link,
-            target,
-        })
+fn boot_profile_path() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("FRACTALD_BOOT_PROFILE_FILE") {
+        return Ok(PathBuf::from(path));
     }
-}
-
-fn unit_contents(boot: &BootPaths) -> Result<String, String> {
-    let binary = fractald_binary()?;
-    let escaped_binary = escape_systemd_word(&binary);
-    let target = &boot.target;
-    Ok(format!(
-        "[Unit]\nDescription=FractalD service supervisor\n\n[Service]\nType=simple\nEnvironment=FRACTALD_BOOT_TARGET={target}\nExecStart={escaped_binary} daemon\nRestart=on-failure\nRestartSec=1s\n\n[Install]\nWantedBy={target}\n"
-    ))
+    if fractald_platform::is_root() {
+        Ok(PathBuf::from("/etc/fractald/boot.conf"))
+    } else {
+        let config_home = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or_else(|| "HOME or XDG_CONFIG_HOME is required".to_owned())?;
+        Ok(config_home.join("fractald/boot.conf"))
+    }
 }
 
 fn fractald_binary() -> Result<PathBuf, String> {
@@ -803,77 +759,22 @@ fn fractald_binary() -> Result<PathBuf, String> {
         .ok_or_else(|| "cannot locate sibling fractald binary".to_owned())
 }
 
-fn escape_systemd_word(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace(' ', "\\x20")
-        .replace('\t', "\\x09")
-}
-
 fn write_if_changed(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Ok(existing) = fs::read(path) {
         if existing == contents {
             return Ok(());
         }
     }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    }
     fs::write(path, contents).map_err(|error| format!("cannot write {}: {error}", path.display()))
-}
-
-fn ensure_enable_link(boot: &BootPaths) -> Result<(), String> {
-    match fs::symlink_metadata(&boot.enable_link) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = fs::read_link(&boot.enable_link).map_err(|error| {
-                format!("cannot inspect {}: {error}", boot.enable_link.display())
-            })?;
-            if target != Path::new("../fractald.service") {
-                return Err(format!(
-                    "{} already points to {}",
-                    boot.enable_link.display(),
-                    target.display()
-                ));
-            }
-            Ok(())
-        }
-        Ok(_) => Err(format!("{} is not a symlink", boot.enable_link.display())),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            symlink("../fractald.service", &boot.enable_link)
-                .map_err(|error| format!("cannot enable {}: {error}", boot.enable_link.display()))
-        }
-        Err(error) => Err(format!(
-            "cannot inspect {}: {error}",
-            boot.enable_link.display()
-        )),
-    }
-}
-
-fn remove_enable_link(boot: &BootPaths) -> Result<(), String> {
-    match fs::symlink_metadata(&boot.enable_link) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = fs::read_link(&boot.enable_link).map_err(|error| {
-                format!("cannot inspect {}: {error}", boot.enable_link.display())
-            })?;
-            if target != Path::new("../fractald.service") {
-                return Err(format!(
-                    "{} points to {} and was left intact",
-                    boot.enable_link.display(),
-                    target.display()
-                ));
-            }
-            fs::remove_file(&boot.enable_link)
-                .map_err(|error| format!("cannot disable {}: {error}", boot.enable_link.display()))
-        }
-        Ok(_) => Err(format!("{} is not a symlink", boot.enable_link.display())),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "cannot inspect {}: {error}",
-            boot.enable_link.display()
-        )),
-    }
 }
 
 fn print_help() {
     println!(
-        "FractalD control\n\nCommands:\n  enable [SERVICE] [--now]   enable daemon or service\n  disable [SERVICE] [--now]  disable daemon or service\n  mask SERVICE               prevent a service from starting\n  unmask SERVICE             remove a service mask\n  start [SERVICE]            launch daemon or start a service\n  isolate TARGET             activate a target and stop other units\n  stop [SERVICE]             gracefully stop daemon or a service\n  restart SERVICE            restart a service\n  reset-failed [SERVICE]     clear failed service state\n  reload SERVICE             reload a service\n  status [SERVICE]           show daemon or service status\n  is-enabled SERVICE         check persistent service enablement\n  is-active SERVICE          check service activity\n  is-failed SERVICE          check failed state\n  list [PATTERN]             list loaded services\n  events [SINCE] [--follow]  replay or subscribe to state events\n  reload                     reload service configuration"
+        "FractalD control\n\nCommands:\n  enable [SERVICE] [--now]   enable daemon or service\n  disable [SERVICE] [--now]  disable daemon or service\n  mask SERVICE               prevent a service from starting\n  unmask SERVICE             remove a service mask\n  start [SERVICE]            launch daemon or start a service\n  isolate PROFILE            activate a service profile and stop other services\n  stop [SERVICE]             gracefully stop daemon or a service\n  restart SERVICE            restart a service\n  reset-failed [SERVICE]     clear failed service state\n  reload SERVICE             reload a service\n  status [SERVICE]           show daemon or service status\n  is-enabled SERVICE         check persistent service enablement\n  is-active SERVICE          check service activity\n  is-failed SERVICE          check failed state\n  list [PATTERN]             list loaded services\n  events [SINCE] [--follow]  replay or subscribe to state events\n  reload                     reload service configuration"
     );
     println!("  transaction-status ID      inspect an asynchronous lifecycle transaction");
 }
@@ -898,17 +799,11 @@ mod tests {
     }
 
     #[test]
-    fn escapes_systemd_path_words() {
-        let path = Path::new("/tmp/FractalD data\\bin");
-        assert_eq!(escape_systemd_word(path), "/tmp/FractalD\\x20data\\\\bin");
-    }
-
-    #[test]
     fn accepts_now_before_or_after_enable() {
         let before =
-            parse_args(["--now", "enable", "demo.service"].map(OsString::from)).expect("arguments");
+            parse_args(["--now", "enable", "demo.svc"].map(OsString::from)).expect("arguments");
         let after =
-            parse_args(["enable", "demo.service", "--now"].map(OsString::from)).expect("arguments");
+            parse_args(["enable", "demo.svc", "--now"].map(OsString::from)).expect("arguments");
         assert_eq!(before, after);
         assert_eq!(
             before,
@@ -916,7 +811,7 @@ mod tests {
                 command: Some("enable".to_owned()),
                 now: true,
                 follow: false,
-                operands: vec!["demo.service".to_owned()],
+                operands: vec!["demo.svc".to_owned()],
             }
         );
     }
@@ -934,9 +829,9 @@ mod tests {
 
     #[test]
     fn matches_list_patterns() {
-        assert!(wildcard_match("user@*", "user@1000.service"));
-        assert!(wildcard_match("*.service", "demo.service"));
-        assert!(wildcard_match("db?s.service", "dbus.service"));
-        assert!(!wildcard_match("user@*", "system.service"));
+        assert!(wildcard_match("worker@*", "worker@1000"));
+        assert!(wildcard_match("*", "demo"));
+        assert!(wildcard_match("db?s", "dbus"));
+        assert!(!wildcard_match("worker@*", "system"));
     }
 }

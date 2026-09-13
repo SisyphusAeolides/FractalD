@@ -11,5 +11,5 @@ workspace = true
 fractald-platform = { path = "../fractald-platform" }
 
 [[bin]]
-name = "systemd-tmpfiles"
+name = "fractald-tmpfiles"
 path = "src/main.rs"

@@ -1,5 +1,5 @@
 [package]
-name = "fractald-analyze"
+name = "fractald-package-trigger"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,8 +8,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+fractald-control = { path = "../fractald-control" }
 fractald-config = { path = "../fractald-config" }
 
 [[bin]]
-name = "fractald-analyze"
+name = "fractald-package-trigger"
 path = "src/main.rs"
