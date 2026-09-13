@@ -1771,6 +1771,7 @@ impl ManagedService {
         }
         match self.spec().service_type {
             ServiceType::Oneshot => false,
+            ServiceType::Mount | ServiceType::Swap => false,
             ServiceType::Notify => self.notify_ready,
             ServiceType::Dbus => self.dbus_ready,
             _ => true,
@@ -7747,7 +7748,7 @@ fn toolbox_command(
     service_type: ServiceType,
     mount_filesystem: Option<&str>,
 ) -> Command {
-    let directory = env::var_os("FRACTALD_TOOLBOX_DIR").map(PathBuf::from);
+    let directory = native_toolbox_directory();
     let binary = env::var_os("FRACTALD_RUSTYBOX").map(PathBuf::from);
     let (program, argv0) = toolbox_selection(
         program,
@@ -7908,7 +7909,7 @@ fn kernel_mount_filesystem(filesystem: Option<&str>) -> bool {
 }
 
 fn prepend_toolbox_path(environment: &mut BTreeMap<OsString, OsString>) {
-    let Some(directory) = env::var_os("FRACTALD_TOOLBOX_DIR") else {
+    let Some(directory) = native_toolbox_directory() else {
         return;
     };
     let existing = environment
@@ -7922,6 +7923,21 @@ fn prepend_toolbox_path(environment: &mut BTreeMap<OsString, OsString>) {
     if let Ok(path) = env::join_paths(paths) {
         environment.insert(OsString::from("PATH"), path);
     }
+}
+
+fn native_toolbox_directory() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("FRACTALD_TOOLBOX_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    [
+        "/usr/lib/fractald/toolbox",
+        "/usr/libexec/fractald/toolbox",
+        "/usr/local/lib/fractald/toolbox",
+        "/usr/local/libexec/fractald/toolbox",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_dir())
 }
 
 fn toolbox_executable(path: &Path) -> bool {

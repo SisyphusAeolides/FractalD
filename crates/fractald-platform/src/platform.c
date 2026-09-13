@@ -2143,6 +2143,14 @@ static int mount_pid1_filesystem(
     return 0;
 }
 
+static int pid1_mount_failure(const char *stage)
+{
+    int saved_errno = errno;
+    (void)fprintf(stderr, "fractald: PID1 mount setup failed at %s: %s\n", stage, strerror(saved_errno));
+    errno = saved_errno;
+    return -1;
+}
+
 static int make_pid1_device(
     const char *path,
     mode_t mode,
@@ -2182,7 +2190,7 @@ int fractald_prepare_pid1_mounts(void)
     };
     for (size_t index = 0U; index < sizeof(directories) / sizeof(directories[0]); ++index) {
         if (ensure_pid1_directory(directories[index].path, directories[index].mode) < 0) {
-            return -1;
+            return pid1_mount_failure(directories[index].path);
         }
     }
 
@@ -2191,32 +2199,38 @@ int fractald_prepare_pid1_mounts(void)
             "/proc",
             "proc",
             MS_NOSUID | MS_NODEV | MS_NOEXEC,
-            NULL) < 0
-        || mount_pid1_filesystem(
+            NULL) < 0) {
+        return pid1_mount_failure("proc on /proc");
+    }
+    if (mount_pid1_filesystem(
             "sysfs",
             "/sys",
             "sysfs",
             MS_NOSUID | MS_NODEV | MS_NOEXEC,
-            NULL) < 0
-        || mount_pid1_filesystem(
+            NULL) < 0) {
+        return pid1_mount_failure("sysfs on /sys");
+    }
+    if (mount_pid1_filesystem(
             "tmpfs",
             "/run",
             "tmpfs",
             MS_NOSUID | MS_NODEV,
-            "mode=0755") < 0
-        || mount_pid1_filesystem(
+            "mode=0755") < 0) {
+        return pid1_mount_failure("tmpfs on /run");
+    }
+    if (mount_pid1_filesystem(
             "cgroup2",
             "/sys/fs/cgroup",
             "cgroup2",
             MS_NOSUID | MS_NODEV | MS_NOEXEC,
             NULL) < 0) {
-        return -1;
+        return pid1_mount_failure("cgroup2 on /sys/fs/cgroup");
     }
 
     if (mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID | MS_NOEXEC, "mode=0755") < 0
         && errno != EBUSY) {
         if (errno != ENODEV && errno != EINVAL && errno != EPERM) {
-            return -1;
+            return pid1_mount_failure("devtmpfs on /dev");
         }
         if (mount_pid1_filesystem(
                 "tmpfs",
@@ -2224,7 +2238,7 @@ int fractald_prepare_pid1_mounts(void)
                 "tmpfs",
                 MS_NOSUID | MS_NOEXEC,
                 "mode=0755") < 0) {
-            return -1;
+            return pid1_mount_failure("tmpfs on /dev");
         }
         if (make_pid1_device("/dev/null", 0666, 1U, 3U) < 0
             || make_pid1_device("/dev/zero", 0666, 1U, 5U) < 0
@@ -2232,8 +2246,13 @@ int fractald_prepare_pid1_mounts(void)
             || make_pid1_device("/dev/urandom", 0666, 1U, 9U) < 0
             || make_pid1_device("/dev/tty", 0666, 5U, 0U) < 0
             || make_pid1_device("/dev/console", 0600, 5U, 1U) < 0) {
-            return -1;
+            return pid1_mount_failure("essential devices on /dev");
         }
+    }
+    if (ensure_pid1_directory("/dev/pts", 0755) < 0
+        || ensure_pid1_directory("/dev/shm", 01777) < 0
+        || ensure_pid1_directory("/dev/mqueue", 0755) < 0) {
+        return pid1_mount_failure("device filesystem mount points");
     }
     if (mount_pid1_filesystem(
             "devpts",
@@ -2253,7 +2272,7 @@ int fractald_prepare_pid1_mounts(void)
             "mqueue",
             MS_NOSUID | MS_NODEV | MS_NOEXEC,
             NULL) < 0) {
-        return -1;
+        return pid1_mount_failure("mqueue on /dev/mqueue");
     }
     return 0;
 }

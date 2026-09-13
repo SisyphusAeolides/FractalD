@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -8,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use fractald_control::{Request, Response, RuntimePaths, StatePaths};
+use fractald_config::parse_service_file;
 
 const NOT_RUNNING: u8 = 3;
 const TRANSACTION_PENDING: u8 = 2;
@@ -70,6 +72,7 @@ fn run() -> Result<u8, String> {
             transaction_status(&operands[0])
         }
         Some("daemon-reload") if !now && operands.is_empty() => reload_services(),
+        Some("doctor") | Some("verify-pid1") if !now && operands.is_empty() => doctor(),
         Some("mask") if !now && operands.len() == 1 => mask_service(&operands[0]),
         Some("unmask") if !now && operands.len() == 1 => unmask_service(&operands[0]),
         Some("enable") | Some("disable") if now || !operands.is_empty() => {
@@ -89,7 +92,9 @@ fn run() -> Result<u8, String> {
         | Some("is-failed")
         | Some("transaction-status")
         | Some("transaction")
-        | Some("daemon-reload") => {
+        | Some("daemon-reload")
+        | Some("doctor")
+        | Some("verify-pid1") => {
             if now {
                 Err("--now is supported with enable and disable only".to_owned())
             } else {
@@ -299,6 +304,10 @@ fn daemon_status() -> Result<u8, String> {
 }
 
 fn start_service(name: &str) -> Result<u8, String> {
+    let runtime = RuntimePaths::from_environment();
+    if current_status(&runtime)?.is_none() {
+        start_daemon()?;
+    }
     match service_request(Request::StartService(name.to_owned()))? {
         Response::Accepted {
             id,
@@ -658,6 +667,421 @@ fn transaction_status(value: &str) -> Result<u8, String> {
     }
 }
 
+struct DoctorReport {
+    failures: usize,
+    warnings: usize,
+}
+
+impl DoctorReport {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            warnings: 0,
+        }
+    }
+
+    fn pass(&self, label: &str, detail: impl AsRef<str>) {
+        println!("PASS {label}: {}", detail.as_ref());
+    }
+
+    fn fail(&mut self, label: &str, detail: impl AsRef<str>) {
+        self.failures += 1;
+        println!("FAIL {label}: {}", detail.as_ref());
+    }
+
+    fn warn(&mut self, label: &str, detail: impl AsRef<str>) {
+        self.warnings += 1;
+        println!("WARN {label}: {}", detail.as_ref());
+    }
+}
+
+fn doctor() -> Result<u8, String> {
+    let root = env::var_os("FRACTALD_DOCTOR_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    if !root.is_dir() {
+        return Err(format!(
+            "doctor root is not a directory: {}",
+            root.display()
+        ));
+    }
+
+    let mut report = DoctorReport::new();
+    println!("FractalD PID1 preflight ({})", root.display());
+    doctor_binaries(&root, &mut report);
+    let services = doctor_services(&root, &mut report);
+    doctor_toolbox(&root, &mut report);
+    doctor_boot_selection(&root, &mut report);
+    doctor_runtime(&root, &services, &mut report);
+
+    if report.failures == 0 {
+        if report.warnings == 0 {
+            println!("FractalD doctor: PASS");
+        } else {
+            println!(
+                "FractalD doctor: PASS ({} warning(s); review before reboot)",
+                report.warnings
+            );
+        }
+        Ok(0)
+    } else {
+        println!(
+            "FractalD doctor: FAIL ({} failure(s), {} warning(s))",
+            report.failures, report.warnings
+        );
+        Ok(1)
+    }
+}
+
+fn doctor_binaries(root: &Path, report: &mut DoctorReport) {
+    for relative in ["/usr/bin/fractald", "/usr/bin/fractalctl", "/usr/lib/fractald/init"] {
+        let path = rooted_path(root, Path::new(relative));
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() && is_executable(&metadata) => {
+                report.pass("binary", format!("{} is executable", path.display()));
+            }
+            Ok(_) => report.fail(
+                "binary",
+                format!("{} is not an executable regular file", path.display()),
+            ),
+            Err(error) => report.fail(
+                "binary",
+                format!("cannot inspect {}: {error}", path.display()),
+            ),
+        }
+    }
+}
+
+fn doctor_services(root: &Path, report: &mut DoctorReport) -> BTreeMap<String, PathBuf> {
+    let directories = doctor_service_directories(root);
+    let mut selected = BTreeMap::new();
+    for directory in directories {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                report.fail(
+                    "services",
+                    format!("cannot read {}: {error}", directory.display()),
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) => {
+                    report.fail(
+                        "services",
+                        format!("cannot enumerate {}: {error}", directory.display()),
+                    );
+                    continue;
+                }
+            };
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(name) = file_name.strip_suffix(".svc") else {
+                continue;
+            };
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    report.fail(
+                        "services",
+                        format!("cannot inspect {}: {error}", path.display()),
+                    );
+                    continue;
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                report.fail(
+                    "services",
+                    format!("{} is a symlink; native descriptors must be regular files", path.display()),
+                );
+            } else if !metadata.file_type().is_file() {
+                report.fail(
+                    "services",
+                    format!("{} is not a regular file", path.display()),
+                );
+            } else {
+                selected.insert(name.to_owned(), path);
+            }
+        }
+    }
+
+    if selected.is_empty() {
+        report.fail(
+            "services",
+            "no native .svc descriptors were found in the system service roots",
+        );
+        return selected;
+    }
+
+    let mut invalid = false;
+    for (name, path) in &selected {
+        match parse_service_file(path) {
+            Ok(spec) if spec.name == *name => {}
+            Ok(spec) => {
+                invalid = true;
+                report.fail(
+                    "services",
+                    format!("{} declares unexpected service name {}", path.display(), spec.name),
+                );
+            }
+            Err(error) => {
+                invalid = true;
+                report.fail(
+                    "services",
+                    format!("cannot parse {}: {error}", path.display()),
+                );
+            }
+        }
+    }
+    if !selected.contains_key("boot") {
+        report.fail("services", "boot.svc is missing");
+    } else if !invalid {
+        report.pass(
+            "services",
+            format!("{} native descriptor(s) validate", selected.len()),
+        );
+    }
+    selected
+}
+
+fn doctor_service_directories(root: &Path) -> Vec<PathBuf> {
+    if let Some(path) = env::var_os("FRACTALD_SERVICE_DIR") {
+        return vec![PathBuf::from(path)];
+    }
+    [
+        "/usr/lib/fractald/services",
+        "/usr/libexec/fractald/services",
+        "/usr/local/lib/fractald/services",
+        "/usr/local/libexec/fractald/services",
+        "/run/fractald/services",
+        "/etc/fractald/services",
+    ]
+    .into_iter()
+    .map(|path| rooted_path(root, Path::new(path)))
+    .collect()
+}
+
+fn doctor_toolbox(root: &Path, report: &mut DoctorReport) {
+    let failures_before = report.failures;
+    let directories = [
+        "/usr/lib/fractald/toolbox",
+        "/usr/libexec/fractald/toolbox",
+        "/usr/local/lib/fractald/toolbox",
+        "/usr/local/libexec/fractald/toolbox",
+    ];
+    let Some(directory) = directories
+        .into_iter()
+        .map(|path| rooted_path(root, Path::new(path)))
+        .find(|path| path.is_dir())
+    else {
+        report.fail("toolbox", "no native RustyBox toolbox directory exists");
+        return;
+    };
+    for applet in ["mount", "umount", "mkdir", "mv", "rm", "rmdir", "swapon", "swapoff"] {
+        let path = directory.join(applet);
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() && is_executable(&metadata) => {}
+            Ok(_) => report.fail("toolbox", format!("{} is not executable", path.display())),
+            Err(error) => report.fail(
+                "toolbox",
+                format!("cannot inspect {}: {error}", path.display()),
+            ),
+        }
+    }
+    if report.failures == failures_before {
+        report.pass(
+            "toolbox",
+            format!("{} provides native storage applets", directory.display()),
+        );
+    }
+}
+
+fn doctor_boot_selection(root: &Path, report: &mut DoctorReport) {
+    let mut selected = Vec::new();
+    let mut sources = vec![rooted_path(root, Path::new("/etc/kernel/cmdline"))];
+    sources.push(rooted_path(root, Path::new("/etc/default/grub")));
+    let entries = rooted_path(root, Path::new("/boot/loader/entries"));
+    if let Ok(directory) = fs::read_dir(&entries) {
+        for entry in directory.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("conf") {
+                sources.push(path);
+            }
+        }
+    }
+    for source in sources {
+        if let Ok(contents) = fs::read_to_string(&source) {
+            selected.extend(init_arguments(&contents));
+        }
+    }
+    let init_links = ["/sbin/init", "/usr/sbin/init"];
+    let link_selection = init_links.into_iter().find_map(|path| {
+        let path = rooted_path(root, Path::new(path));
+        fs::canonicalize(&path)
+            .ok()
+            .filter(|target| is_known_fractald_binary(root, target))
+            .map(|target| (path, target))
+    });
+    let selected_argument = selected
+        .iter()
+        .find(|value| is_known_fractald_path(root, value));
+    if let Some(value) = selected_argument {
+        report.pass("boot", format!("kernel selection contains init={value}"));
+    } else if let Some((path, target)) = link_selection {
+        report.pass(
+            "boot",
+            format!("{} resolves to {}", path.display(), target.display()),
+        );
+    } else {
+        report.fail(
+            "boot",
+            "no kernel/initramfs selection points to FractalD; configure init=/usr/bin/fractald or /sbin/init",
+        );
+    }
+
+    let boot_profile = rooted_path(root, Path::new("/etc/fractald/boot.conf"));
+    match fs::read_to_string(&boot_profile) {
+        Ok(contents) => {
+            let profile = contents.lines().find_map(|line| {
+                let (key, value) = line.trim().split_once('=')?;
+                (key == "profile" && !value.trim().is_empty()).then(|| value.trim())
+            });
+            match profile {
+                Some(profile) => report.pass("boot-profile", format!("profile={profile}")),
+                None => report.fail(
+                    "boot-profile",
+                    format!("{} does not define profile=", boot_profile.display()),
+                ),
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => report.warn(
+            "boot-profile",
+            format!("{} is absent; PID1 will use the built-in boot profile", boot_profile.display()),
+        ),
+        Err(error) => report.fail(
+            "boot-profile",
+            format!("cannot read {}: {error}", boot_profile.display()),
+        ),
+    }
+}
+
+fn init_arguments(contents: &str) -> Vec<String> {
+    contents
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("init="))
+        .map(|value| value.trim_matches(['"', '\'']))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn is_known_fractald_path(root: &Path, value: &str) -> bool {
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return false;
+    }
+    let candidate = rooted_path(root, path);
+    fs::canonicalize(&candidate)
+        .ok()
+        .is_some_and(|target| is_known_fractald_binary(root, &target))
+}
+
+fn is_known_fractald_binary(root: &Path, path: &Path) -> bool {
+    ["/usr/bin/fractald", "/usr/lib/fractald/init"]
+        .into_iter()
+        .map(|candidate| rooted_path(root, Path::new(candidate)))
+        .filter_map(|candidate| fs::canonicalize(candidate).ok())
+        .any(|candidate| candidate == path)
+}
+
+fn doctor_runtime(
+    root: &Path,
+    services: &BTreeMap<String, PathBuf>,
+    report: &mut DoctorReport,
+) {
+    let proc_root = env::var_os("FRACTALD_DOCTOR_PROC_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| rooted_path(root, Path::new("/proc")));
+    let comm_path = proc_root.join("1/comm");
+    let current_pid1 = match fs::read_to_string(&comm_path) {
+        Ok(comm) if comm.trim() == "fractald" => {
+            report.pass("pid1", "current process 1 is fractald");
+            true
+        }
+        Ok(comm) => {
+            report.fail("pid1", format!("current process 1 is {}", comm.trim()));
+            false
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound && root != Path::new("/") => {
+            report.warn("pid1", "not checked for an alternate root without a proc fixture");
+            false
+        }
+        Err(error) => {
+            report.fail("pid1", format!("cannot inspect {}: {error}", comm_path.display()));
+            false
+        }
+    };
+
+    for relative in ["/proc", "/sys", "/dev", "/run"] {
+        let path = rooted_path(root, Path::new(relative));
+        if path.is_dir() {
+            if current_pid1 {
+                report.pass("mounts", format!("{} exists", path.display()));
+            }
+        } else if current_pid1 {
+            report.fail("mounts", format!("{} is missing", path.display()));
+        }
+    }
+    let controllers = rooted_path(root, Path::new("/sys/fs/cgroup/cgroup.controllers"));
+    if controllers.is_file() {
+        if current_pid1 {
+            report.pass("cgroup", "cgroup v2 controllers are available");
+        }
+    } else if current_pid1 {
+        report.fail("cgroup", "cgroup v2 controllers are unavailable");
+    }
+
+    if current_pid1 {
+        match RuntimePaths::from_environment().request(Request::Status) {
+            Ok(Response::Status { pid: 1, .. }) => report.pass("control", "PID1 control socket is ready"),
+            Ok(Response::Status { pid, .. }) => report.fail(
+                "control",
+                format!("control socket reports daemon pid {pid}, not PID1"),
+            ),
+            Ok(response) => report.fail("control", format!("unexpected control response: {response:?}")),
+            Err(error) => report.fail("control", format!("PID1 control socket is unavailable: {error}")),
+        }
+    } else if !services.is_empty() {
+        report.warn("control", "runtime control socket not checked because FractalD is not current PID1");
+    }
+}
+
+fn rooted_path(root: &Path, path: &Path) -> PathBuf {
+    if root == Path::new("/") {
+        path.to_owned()
+    } else {
+        root.join(path.strip_prefix("/").unwrap_or(path))
+    }
+}
+
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
 fn service_request(request: Request) -> Result<Response, String> {
     RuntimePaths::from_environment()
         .request(request)
@@ -777,10 +1201,12 @@ fn print_help() {
         "FractalD control\n\nCommands:\n  enable [SERVICE] [--now]   enable daemon or service\n  disable [SERVICE] [--now]  disable daemon or service\n  mask SERVICE               prevent a service from starting\n  unmask SERVICE             remove a service mask\n  start [SERVICE]            launch daemon or start a service\n  isolate PROFILE            activate a service profile and stop other services\n  stop [SERVICE]             gracefully stop daemon or a service\n  restart SERVICE            restart a service\n  reset-failed [SERVICE]     clear failed service state\n  reload SERVICE             reload a service\n  status [SERVICE]           show daemon or service status\n  is-enabled SERVICE         check persistent service enablement\n  is-active SERVICE          check service activity\n  is-failed SERVICE          check failed state\n  list [PATTERN]             list loaded services\n  events [SINCE] [--follow]  replay or subscribe to state events\n  reload                     reload service configuration"
     );
     println!("  transaction-status ID      inspect an asynchronous lifecycle transaction");
+    println!("  doctor                     verify PID1 boot, native services, and runtime prerequisites");
+    println!("  verify-pid1                alias for doctor");
 }
 
 fn usage() -> &'static str {
-    "usage: fractalctl [--now] <enable|disable> [SERVICE] | <mask|unmask SERVICE> | <start|isolate|stop|status|reload> [SERVICE] | <restart SERVICE|reset-failed [SERVICE]|is-enabled SERVICE|is-active SERVICE|is-failed SERVICE|transaction-status ID|list [PATTERN]|events [SINCE] [--follow]|reload>"
+    "usage: fractalctl [--now] <enable|disable> [SERVICE] | <mask|unmask SERVICE> | <start|isolate|stop|status|reload> [SERVICE] | <restart SERVICE|reset-failed [SERVICE]|is-enabled SERVICE|is-active SERVICE|is-failed SERVICE|doctor|verify-pid1|transaction-status ID|list [PATTERN]|events [SINCE] [--follow]|reload>"
 }
 
 #[cfg(test)]

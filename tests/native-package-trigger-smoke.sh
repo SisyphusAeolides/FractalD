@@ -73,6 +73,48 @@ sleep 0.1
 "$project_dir/target/debug/fractalctl" stop >/dev/null
 unset daemon_pid
 
+generic_state="$root/generic-state"
+generic_runtime="$root/generic-runtime"
+cat >"$root/usr/lib/fractald/services/generic.svc" <<'SERVICE'
+[service]
+description=Filesystem discovered service
+kind=oneshot
+exec=/bin/sh -c "printf started > %t/generic.marker"
+remain_after_exit=true
+
+[install]
+profile=boot
+SERVICE
+
+unset FRACTALD_PACKAGE_DB FRACTALD_PACKAGE_ROOT
+export FRACTALD_PACKAGE_DISCOVERY=native
+FRACTALD_STATE_DIR="$generic_state" \
+FRACTALD_RUNTIME_DIR="$generic_runtime" \
+    "$project_dir/target/debug/fractald-package-trigger" verify
+FRACTALD_STATE_DIR="$generic_state" \
+FRACTALD_RUNTIME_DIR="$generic_runtime" \
+    "$project_dir/target/debug/fractald-package-trigger" sync
+test -f "$generic_state/enabled/generic"
+grep -F $'generic\tfilesystem' "$generic_state/packages.index" >/dev/null
+
+FRACTALD_STATE_DIR="$generic_state" \
+FRACTALD_RUNTIME_DIR="$generic_runtime" \
+    "$project_dir/target/debug/fractalctl" start generic >/dev/null
+for _ in $(seq 1 100); do
+    if [ -f "$generic_runtime/generic.marker" ]; then
+        break
+    fi
+    sleep 0.02
+done
+test -f "$generic_runtime/generic.marker"
+FRACTALD_RUNTIME_DIR="$generic_runtime" \
+    "$project_dir/target/debug/fractalctl" status generic | grep -F 'generic: active' >/dev/null
+FRACTALD_RUNTIME_DIR="$generic_runtime" \
+    "$project_dir/target/debug/fractalctl" stop >/dev/null
+unset FRACTALD_PACKAGE_DISCOVERY
+export FRACTALD_PACKAGE_DB="$root/db"
+export FRACTALD_PACKAGE_ROOT="$root"
+
 cat >"$root/usr/lib/fractald/services/server.svc" <<'SERVICE'
 [service]
 description=Package owned server profile

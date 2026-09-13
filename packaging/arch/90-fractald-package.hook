@@ -4,7 +4,9 @@ Operation=Install
 Operation=Upgrade
 Operation=Remove
 Target=usr/lib/fractald/services/*.svc
+Target=usr/libexec/fractald/services/*.svc
 Target=usr/local/lib/fractald/services/*.svc
+Target=usr/local/libexec/fractald/services/*.svc
 Target=etc/fractald/services/*.svc
 
 [Action]

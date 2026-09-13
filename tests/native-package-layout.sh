@@ -13,6 +13,8 @@ test -f "$root/usr/lib/fractald/services/boot.svc"
 test -f "$root/usr/lib/fractald/services/fractald-journald.svc"
 test -f "$root/usr/lib/fractald/services/fractald-udevd.svc"
 test -f "$root/usr/share/libalpm/hooks/90-fractald-package.hook"
+test -L "$root/usr/lib/fractald/toolbox/mount"
+test "$(readlink "$root/usr/lib/fractald/toolbox/mount")" = ../../../bin/rustybox
 test -x "$root/usr/lib/fractald/init"
 test -L "$root/usr/bin/fractald-udevd"
 test "$(readlink "$root/usr/bin/fractald-udevd")" = fractald-udevadm

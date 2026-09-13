@@ -8,14 +8,16 @@
 - Native listeners, timers, path watches, mounts, swaps, and device waits.
 - Credentials, namespaces, resource limits, cgroup ownership, and hardening.
 - Native PID1 mount setup, child adoption, shutdown, and power actions.
-- Arch pacman package detection and post transaction reload hook.
+- Package-neutral native descriptor discovery with optional pacman ownership
+  metadata and post transaction reload hook.
 - Local control socket, persistent markers, masks, and event subscriptions.
 - Arch package metadata, native helper tools, and initramfs builder.
+- Read-only `fractalctl doctor` preflight for boot selection and runtime safety.
+- QEMU installed-root handoff test with a disposable two-device Btrfs root.
 
 ## Next expansions
 
 - Netlink based device policy refresh for hotplugged hardware.
 - Parallel storage preparation with bounded per provider timeouts.
 - Incremental package ownership updates for very large pacman databases.
-- More Arch kernel and initramfs integration tests under QEMU.
 - A stable versioned descriptor schema and migration checker.

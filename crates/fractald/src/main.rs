@@ -40,10 +40,15 @@ fn main() -> ExitCode {
 fn run() -> Result<u8, String> {
     let mut args = env::args_os();
     let _program = args.next();
+
+    // PID 1 is launched by the kernel or an initramfs, not by a CLI user.
+    // Boot loaders and initramfs implementations may append arguments, so the
+    // PID 1 entrypoint must not depend on an empty argv after argv[0].
+    if std::process::id() == 1 {
+        return run_daemon();
+    }
+
     let Some(command) = args.next() else {
-        if std::process::id() == 1 {
-            return run_daemon();
-        }
         return Err(usage());
     };
 
@@ -850,7 +855,9 @@ fn service_directories() -> Vec<PathBuf> {
     } else if fractald_platform::is_root() {
         directories.extend([
             PathBuf::from("/usr/lib/fractald/services"),
+            PathBuf::from("/usr/libexec/fractald/services"),
             PathBuf::from("/usr/local/lib/fractald/services"),
+            PathBuf::from("/usr/local/libexec/fractald/services"),
             PathBuf::from("/run/fractald/services"),
             PathBuf::from("/etc/fractald/services"),
         ]);

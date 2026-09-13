@@ -7,7 +7,8 @@ configuration for another init system.
 
 Fedora and RHEL-compatible distributions are the primary development targets.
 The native service format uses `.svc` files stored below
-`/usr/lib/fractald/services`, `/usr/local/lib/fractald/services`,
+`/usr/lib/fractald/services`, `/usr/libexec/fractald/services`,
+`/usr/local/lib/fractald/services`, `/usr/local/libexec/fractald/services`,
 `/run/fractald/services`, or `/etc/fractald/services`.
 
 ## Native service descriptors
@@ -34,11 +35,13 @@ filesystem watches, mounts, swaps, devices, and grouping profiles. Hardening,
 credentials, resource limits, conditions, environment setup, and lifecycle
 hooks use the same descriptor.
 
-Package owned descriptors are validated and discovered from the system package
-manager database. The installed `90-fractald-package.hook` runs
-`fractald-package-trigger sync` after a transaction. Descriptors marked with
-`profile=boot` are enabled automatically, removed descriptors are disabled,
-and a running FractalD instance receives a native reload request.
+Every regular `.svc` file in the native service directories is discovered and
+validated by FractalD at startup and reload, regardless of which package
+installed it. A descriptor with `profile=boot` is started by the native boot
+profile. `fractald-package-trigger sync` is optional state maintenance: it uses
+package-file metadata when available and otherwise scans the native directories
+directly. The Arch package hook invokes it after transactions; the RPM package
+does not depend on an Arch package database.
 
 ## Build on Fedora / RHEL / CentOS Stream
 
@@ -66,7 +69,8 @@ sudo dnf install fractald
 Install the native tools into a staging root with `make install`. The package
 places the PID1 binary at `/usr/bin/fractald`, a copy at
 `/usr/lib/fractald/init`, native descriptors below `/usr/lib/fractald/services`,
-and the package hook below `/usr/share/fractald/hooks`.
+and RustyBox helper links below the native FractalD toolbox directory. Arch
+installs its optional package hook at `/usr/share/libalpm/hooks`.
 
 ## Control
 
@@ -82,18 +86,36 @@ fractalctl mask example
 fractalctl unmask example
 fractalctl list
 fractalctl events --follow
+fractalctl doctor
 ```
 
 `fractalctl enable` writes `/etc/fractald/boot.conf` and persists the `boot`
-profile marker. A bootloader or initramfs can select `/usr/bin/fractald` with
-`init=/usr/bin/fractald`; when FractalD is PID1 it prepares `/proc`, `/sys`,
-`/run`, `/dev`, and cgroup v2 before loading services. The `boot` profile and
-package markers then provide the initial service set.
+profile marker. `fractalctl start SERVICE` starts FractalD first when no daemon
+is running, then submits the service transaction. Enabling the profile does not
+rewrite a bootloader or replace `/sbin/init`; select `/usr/bin/fractald` with
+`init=/usr/bin/fractald` in the boot entry, or point `/sbin/init` at the native
+binary after an initramfs/root handoff has been installed. `fractalctl doctor`
+checks the installed binaries, native descriptors, toolbox, boot selection,
+PID1 identity, and cgroup/mount prerequisites before a reboot. When FractalD is
+PID1 it prepares `/proc`, `/sys`, `/run`, `/dev`, and cgroup v2 before loading
+every native descriptor. Package markers are optional and do not gate discovery.
 
 Use `FRACTALD_SERVICE_DIR`, `FRACTALD_STATE_DIR`, and
 `FRACTALD_RUNTIME_DIR` to run isolated development instances. Use
-`FRACTALD_PACKAGE_DB` and `FRACTALD_PACKAGE_ROOT` to test package detection
-against a fixture database.
+`FRACTALD_PACKAGE_DB` and `FRACTALD_PACKAGE_ROOT` test package-file discovery
+against a fixture database. Set `FRACTALD_PACKAGE_DISCOVERY=native` to force
+package-neutral filesystem discovery in a test or package script.
+
+The production-oriented PID1 gate is:
+
+```sh
+make production-check
+```
+
+The gate includes a disposable two-device Btrfs initramfs boot and a separate
+installed-root boot. The latter mounts a Btrfs root, adds a second virtual disk
+to the same filesystem, switches root, and verifies that native journald,
+udevd, storage, and `fractalctl` service state all work while FractalD is PID1.
 
 ## Project layout
 

@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fractald_config::parse_service_file;
-use fractald_control::{Request, Response, RuntimePaths, StatePaths, remove_stale_socket};
+use fractald_control::{
+    Request, Response, RuntimePaths, StatePaths, remove_stale_socket, service_directories,
+};
 
 fn main() -> std::process::ExitCode {
     match run(env::args().skip(1)) {
@@ -40,7 +42,7 @@ fn sync_packages(update_state: bool) -> Result<(), String> {
     let profiles = validate_package_services(&services)?;
     if !update_state {
         println!(
-            "verified {} package service descriptor(s)",
+            "verified {} native service descriptor(s)",
             service_count(&services)
         );
         return Ok(());
@@ -128,7 +130,20 @@ fn selected_profile() -> String {
 }
 
 fn discover_package_services() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
-    let database = env::var_os("FRACTALD_PACKAGE_DB")
+    if let Ok(mode) = env::var("FRACTALD_PACKAGE_DISCOVERY") {
+        match mode.as_str() {
+            "native" | "filesystem" => return discover_native_services(),
+            "package" | "pacman" => {}
+            other => {
+                return Err(format!(
+                    "unsupported FRACTALD_PACKAGE_DISCOVERY mode {other}"
+                ));
+            }
+        }
+    }
+    let explicit_database = env::var_os("FRACTALD_PACKAGE_DB");
+    let database = explicit_database
+        .clone()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/lib/pacman/local"));
     let package_root = env::var_os("FRACTALD_PACKAGE_ROOT")
@@ -136,6 +151,9 @@ fn discover_package_services() -> Result<BTreeMap<String, Vec<PathBuf>>, String>
         .unwrap_or_else(|| PathBuf::from("/"));
     let entries = match fs::read_dir(&database) {
         Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && explicit_database.is_none() => {
+            return discover_native_services();
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(error) => {
             return Err(format!(
@@ -165,7 +183,9 @@ fn discover_package_services() -> Result<BTreeMap<String, Vec<PathBuf>>, String>
             }
             let relative = line.trim_start_matches('/').trim_start_matches("./");
             if !relative.starts_with("usr/lib/fractald/services/")
+                && !relative.starts_with("usr/libexec/fractald/services/")
                 && !relative.starts_with("usr/local/lib/fractald/services/")
+                && !relative.starts_with("usr/local/libexec/fractald/services/")
                 && !relative.starts_with("etc/fractald/services/")
             {
                 continue;
@@ -201,6 +221,55 @@ fn discover_package_services() -> Result<BTreeMap<String, Vec<PathBuf>>, String>
         }
     }
     Ok(result)
+}
+
+fn discover_native_services() -> Result<BTreeMap<String, Vec<PathBuf>>, String> {
+    let mut selected = BTreeMap::new();
+    for directory in service_directories() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read service directory {}: {error}",
+                    directory.display()
+                ));
+            }
+        };
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("cannot enumerate {}: {error}", directory.display()))?
+                .path();
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Some(name) = file_name.strip_suffix(".svc") else {
+                continue;
+            };
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!("service descriptor {} is a symlink", path.display()));
+            }
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "service descriptor {} is not a regular file",
+                    path.display()
+                ));
+            }
+            // Directory order is the native overlay order; a later directory
+            // replaces an earlier descriptor with the same service name.
+            selected.insert(name.to_owned(), path);
+        }
+    }
+
+    if selected.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(BTreeMap::from([(
+        "filesystem".to_owned(),
+        selected.into_values().collect(),
+    )]))
 }
 
 fn service_count(services: &BTreeMap<String, Vec<PathBuf>>) -> usize {

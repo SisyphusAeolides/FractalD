@@ -271,7 +271,9 @@ pub fn service_directories() -> Vec<PathBuf> {
     if fractald_platform::is_root() {
         vec![
             PathBuf::from("/usr/lib/fractald/services"),
+            PathBuf::from("/usr/libexec/fractald/services"),
             PathBuf::from("/usr/local/lib/fractald/services"),
+            PathBuf::from("/usr/local/libexec/fractald/services"),
             PathBuf::from("/run/fractald/services"),
             PathBuf::from("/etc/fractald/services"),
         ]

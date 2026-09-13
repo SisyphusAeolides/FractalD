@@ -26,19 +26,25 @@ configuration for another init system.
 
 %build
 make PREFIX=/usr BINDIR=%{_bindir} LIBEXECDIR=%{_libexecdir} \
-    SERVICE_DIR=%{_libexecdir}/fractald/services
+    SERVICE_DIR=/usr/lib/fractald/services INSTALL_ALPM_HOOK=0
 
 %install
 make DESTDIR=%{buildroot} PREFIX=/usr BINDIR=%{_bindir} LIBEXECDIR=%{_libexecdir} \
-    SERVICE_DIR=%{_libexecdir}/fractald/services install
+    SERVICE_DIR=/usr/lib/fractald/services INSTALL_ALPM_HOOK=0 install
+
+%posttrans
+if [ -x %{_bindir}/fractald-package-trigger ]; then
+    %{_bindir}/fractald-package-trigger sync >/dev/null 2>&1 || :
+fi
 
 %files
 %license LICENSE
 %doc README.md
-%{_bindir}/fractald
-%{_bindir}/fractalctl
-%dir %{_libexecdir}/fractald/
-%dir %{_libexecdir}/fractald/services/
+%{_bindir}/*
+%{_libexecdir}/fractald/
+/usr/lib/fractald/
+/usr/lib/libnss_fractald.so*
+/usr/share/doc/fractald/
 
 %changelog
 * Sun Sep 13 2026 Kenny Glauner <SisyphusAeolides@pm.me> - 0.1.0-1

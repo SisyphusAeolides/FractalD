@@ -7,11 +7,14 @@ child adoption, shutdown signal handling, and kernel power actions.
 
 ## Boot path
 
-The bootloader or initramfs starts `/usr/bin/fractald` with `init=`. FractalD
-creates or reuses procfs, sysfs, `/run`, `/dev`, cgroup v2, devpts, shared
-memory, and message queue mounts. It loads `.svc` files, validates every native
-directive, creates the package generated storage descriptors, and starts the
-selected profile.
+The bootloader or initramfs starts `/usr/bin/fractald` with `init=`. A normal
+initramfs may mount the installed root and `exec` FractalD through the native
+RustyBox `switch_root` applet; FractalD then remains process 1 after the root
+handoff. When its process ID is 1, FractalD enters the daemon path independently
+of the argument vector supplied by the boot environment. It creates or reuses
+procfs, sysfs, `/run`, `/dev`, cgroup v2, devpts, shared memory, and message
+queue mounts. It loads and validates every native `.svc` file, creates the
+generated storage descriptors, and starts the selected profile.
 
 The boot profile is selected in this order:
 
@@ -19,9 +22,11 @@ The boot profile is selected in this order:
 2. `profile=` in `FRACTALD_BOOT_PROFILE_FILE` or `/etc/fractald/boot.conf`.
 3. `boot` when the process is PID1.
 
-The package trigger keeps package owned profile markers current. A package
-transaction therefore changes the next boot and, when a daemon is running, the
-current descriptor registry after a reload.
+Native descriptor discovery does not depend on a package manager. The optional
+package trigger keeps profile markers and the ownership index current; it uses
+package metadata where available and falls back to the native descriptor
+directories. A package transaction therefore changes the next boot and, when a
+daemon is running, the current descriptor registry after a reload.
 
 ## Service graph
 
@@ -47,7 +52,15 @@ process; a notify service can report readiness over
 format. It emits `storage-prepare.svc`, `storage.svc`, mount descriptors,
 swap descriptors, and `device-*` wait services. The preparation service runs
 block discovery, RAID assembly, volume activation, and encrypted mapping setup
-before filesystem services are started.
+before filesystem services are started. A mount unit is not dependency-ready
+until its mount helper has completed, so ordered services observe a completed
+mount rather than merely a spawned helper.
+
+`make pid1-qemu-btrfs-check` covers initramfs PID1 and an UUID-based two-device
+Btrfs mount. `make pid1-qemu-root-btrfs-check` additionally boots an installed
+Btrfs root, adds its second filesystem device before the root handoff, and
+checks the native boot services after FractalD is PID1. `make production-check`
+runs both paths along with the native, package, and control preflight suites.
 
 ## Control and state
 

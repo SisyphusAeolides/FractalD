@@ -1,5 +1,6 @@
 .PHONY: build release nss rustybox-profile install check test fmt fmt-check \
-    run-self-check native-check package-check pid1-check pid1-static-initramfs \
+    run-self-check native-check package-check fractalctl-doctor-check pid1-check pid1-static-initramfs \
+    pid1-qemu-btrfs-check pid1-qemu-root-btrfs-check production-check \
     chaos-check clean
 
 PREFIX ?= /usr/local
@@ -10,6 +11,7 @@ SYSCONFDIR ?= /etc
 LIBEXECDIR ?= $(PREFIX)/libexec
 SERVICE_DIR ?= $(PREFIX)/lib/fractald/services
 ALPM_HOOK_DIR ?= $(DATADIR)/libalpm/hooks
+INSTALL_ALPM_HOOK ?= 1
 RUSTYBOX_TOOLBOX_DIR ?= $(LIBEXECDIR)/fractald/toolbox
 RUSTYBOX_LINK_TARGET ?= ../../../bin/rustybox
 DESTDIR ?=
@@ -49,7 +51,7 @@ install: release nss
 	install -Dm644 crates/rustybox/APPLET-MANIFEST.txt $(DESTDIR)$(LIBEXECDIR)/fractald/rustybox-applets.txt
 	install -d $(DESTDIR)$(SERVICE_DIR)
 	for service in packaging/arch/services/*.svc; do install -Dm644 $$service $(DESTDIR)$(SERVICE_DIR)/$$(basename $$service); done
-	install -Dm644 packaging/arch/90-fractald-package.hook $(DESTDIR)$(ALPM_HOOK_DIR)/90-fractald-package.hook
+	if [ "$(INSTALL_ALPM_HOOK)" = 1 ]; then install -Dm644 packaging/arch/90-fractald-package.hook $(DESTDIR)$(ALPM_HOOK_DIR)/90-fractald-package.hook; fi
 	install -Dm644 packaging/arch/boot.conf.example $(DESTDIR)$(DATADIR)/doc/fractald/boot.conf.example
 	install -Dm755 target/release/fractald $(DESTDIR)$(PREFIX)/lib/fractald/init
 	install -Dm644 README.md $(DESTDIR)$(DATADIR)/doc/fractald/README.md
@@ -83,11 +85,23 @@ native-check: build
 package-check: release nss
 	sh tests/native-package-layout.sh
 
+fractalctl-doctor-check: release nss
+	sh tests/fractalctl-doctor-smoke.sh
+
 pid1-check:
 	sh tests/pid1-smoke.sh
 
 pid1-static-initramfs: release
 	sh tests/pid1-initramfs-build.sh
+
+pid1-qemu-btrfs-check: release
+	sh tests/pid1-qemu-btrfs-smoke.sh
+
+pid1-qemu-root-btrfs-check: release
+	sh tests/pid1-qemu-root-btrfs-smoke.sh
+
+production-check: check test native-check package-check fractalctl-doctor-check pid1-static-initramfs \
+	pid1-qemu-btrfs-check pid1-qemu-root-btrfs-check chaos-check
 
 chaos-check: build
 	@target/debug/fractald self-check
