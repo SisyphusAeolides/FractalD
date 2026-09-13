@@ -1,14 +1,14 @@
 # FractalD
 
-FractalD is a standalone Linux service manager and native PID1 for Arch based
-systems. It owns the boot process, service graph, process supervision, storage
-activation, package integration, and local control socket. It does not read,
-execute, or generate configuration for another init system.
+FractalD is a standalone Linux service manager and native PID1. It owns the
+boot process, service graph, process supervision, storage activation, package
+integration, and local control socket. It does not read, execute, or generate
+configuration for another init system.
 
-Arch Linux and CachyOS are the primary development targets. The native service
-format uses `.svc` files stored below `/usr/lib/fractald/services`,
-`/usr/local/lib/fractald/services`, `/run/fractald/services`, or
-`/etc/fractald/services`.
+Fedora and RHEL-compatible distributions are the primary development targets.
+The native service format uses `.svc` files stored below
+`/usr/lib/fractald/services`, `/usr/local/lib/fractald/services`,
+`/run/fractald/services`, or `/etc/fractald/services`.
 
 ## Native service descriptors
 
@@ -34,31 +34,39 @@ filesystem watches, mounts, swaps, devices, and grouping profiles. Hardening,
 credentials, resource limits, conditions, environment setup, and lifecycle
 hooks use the same descriptor.
 
-Package owned descriptors are validated and discovered from the Arch pacman
-local database. The installed `90-fractald-package.hook` runs
+Package owned descriptors are validated and discovered from the system package
+manager database. The installed `90-fractald-package.hook` runs
 `fractald-package-trigger sync` after a transaction. Descriptors marked with
 `profile=boot` are enabled automatically, removed descriptors are disabled,
 and a running FractalD instance receives a native reload request.
 
-## Build on Arch
+## Build on Fedora / RHEL / CentOS Stream
 
 ```sh
-sudo pacman -S --needed base-devel rust clang
+sudo dnf install @development-tools rust cargo clang
 make check
 make test
 make native-check
 ```
 
-Build an Arch package from the included metadata:
+Build an RPM package from the included spec:
 
 ```sh
-makepkg -Csi -f packaging/arch/PKGBUILD
+dnf install rpm-build
+rpmbuild -ba fractald.spec
+```
+
+Or install from COPR:
+
+```sh
+sudo dnf copr enable sisyphuscode/fractald
+sudo dnf install fractald
 ```
 
 Install the native tools into a staging root with `make install`. The package
 places the PID1 binary at `/usr/bin/fractald`, a copy at
 `/usr/lib/fractald/init`, native descriptors below `/usr/lib/fractald/services`,
-and the pacman hook below `/usr/share/libalpm/hooks`.
+and the package hook below `/usr/share/fractald/hooks`.
 
 ## Control
 
@@ -97,7 +105,7 @@ against a fixture database.
 - `fractald-storage` turns `fstab` and `crypttab` into native storage services.
 - `fractald-control` defines the local control protocol and persistent state.
 - `fractald-platform` contains the small C boundary for Linux kernel calls.
-- `fractald-package-trigger` connects pacman package contents to service state.
+- `fractald-package-trigger` connects package contents to service state.
 - `rustybox` supplies the optional native initramfs applets and chaos tools.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the boot and supervision
