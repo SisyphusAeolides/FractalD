@@ -1,0 +1,15 @@
+[service]
+description=Refresh the FractalD native package service registry
+kind=oneshot
+exec=/usr/bin/fractald-package-trigger sync
+remain_after_exit=true
+restart=on-failure
+restart_delay=2s
+stdout=inherit
+stderr=inherit
+
+[dependencies]
+requires_mount=/run
+
+[install]
+profile=package-refresh

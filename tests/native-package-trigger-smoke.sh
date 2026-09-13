@@ -36,11 +36,45 @@ env \
 test -f "$root/state/enabled/demo"
 test -f "$root/state/packages.index"
 
+cat >"$root/usr/lib/fractald/services/package-refresh.svc" <<SERVICE
+[service]
+description=Refresh native package services
+kind=oneshot
+exec=$project_dir/target/debug/fractald-package-trigger sync
+remain_after_exit=true
+restart=on-failure
+restart_delay=2s
+stdout=inherit
+stderr=inherit
+
+[install]
+profile=package-refresh
+SERVICE
+cat >"$root/usr/lib/fractald/services/package-refresh-watch.svc" <<SERVICE
+[service]
+description=Watch native package service descriptors
+kind=watch
+remain_after_exit=true
+
+[watch]
+service=package-refresh
+changed=$root/usr/lib/fractald/services
+
+[install]
+profile=boot
+SERVICE
+mkdir -p "$root/db/new-1"
+cat >"$root/db/new-1/files" <<'FILES'
+%FILES%
+usr/lib/fractald/services/new.svc
+FILES
+
 export FRACTALD_SERVICE_DIR="$root/usr/lib/fractald/services"
 export FRACTALD_PACKAGE_DB="$root/db"
 export FRACTALD_PACKAGE_ROOT="$root"
 export FRACTALD_STATE_DIR="$root/state"
 export FRACTALD_RUNTIME_DIR="$root/runtime"
+export FRACTALD_BOOT_PROFILE=boot
 "$project_dir/target/debug/fractald" daemon >"$root/daemon.log" 2>&1 &
 daemon_pid=$!
 for _ in $(seq 1 100); do
@@ -57,6 +91,25 @@ for _ in $(seq 1 100); do
     sleep 0.02
 done
 test -f "$root/runtime/package-trigger.marker"
+
+cat >"$root/usr/lib/fractald/services/new.svc" <<'SERVICE'
+[service]
+description=Service discovered after daemon start
+kind=oneshot
+exec=/bin/sh -c "printf started > %t/new-package.marker"
+remain_after_exit=true
+
+[install]
+profile=boot
+SERVICE
+for _ in $(seq 1 250); do
+    if [ -f "$root/runtime/new-package.marker" ]; then
+        break
+    fi
+    sleep 0.02
+done
+test -f "$root/runtime/new-package.marker"
+test -f "$root/state/enabled/new"
 
 "$project_dir/target/debug/fractalctl" status demo | grep -F 'demo: active' >/dev/null
 

@@ -1,0 +1,15 @@
+[service]
+description=Watch native service descriptor directories for package changes
+kind=watch
+remain_after_exit=true
+
+[watch]
+service=fractald-package-refresh
+changed=/usr/lib/fractald/services
+changed=/usr/libexec/fractald/services
+changed=/usr/local/lib/fractald/services
+changed=/usr/local/libexec/fractald/services
+changed=/etc/fractald/services
+
+[install]
+profile=boot
