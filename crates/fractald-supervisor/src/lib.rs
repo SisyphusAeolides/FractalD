@@ -5834,7 +5834,7 @@ where
 fn open_log_file(path: &Path, append: bool) -> std::io::Result<fs::File> {
     if let Some(parent) = path.parent() {
         let was_present = parent.exists();
-        fs::create_dir_all(parent)?;
+        create_dir_all_following_symlinks(parent)?;
         if !was_present {
             let mut permissions = fs::metadata(parent)?.permissions();
             permissions.set_mode(0o700);
@@ -5865,6 +5865,68 @@ fn open_log_file(path: &Path, append: bool) -> std::io::Result<fs::File> {
         options.truncate(true);
     }
     options.open(path)
+}
+
+fn create_dir_all_following_symlinks(path: &Path) -> std::io::Result<()> {
+    fn create(path: &Path, symlink_depth: u8) -> std::io::Result<()> {
+        if symlink_depth >= 40 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("too many directory symlinks while creating {}", path.display()),
+            ));
+        }
+
+        let mut current = if path.is_absolute() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::new()
+        };
+        let mut components = path.components().peekable();
+        while let Some(component) = components.next() {
+            if component == std::path::Component::RootDir
+                || component == std::path::Component::CurDir
+            {
+                continue;
+            }
+            current.push(component.as_os_str());
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let target = fs::read_link(&current)?;
+                    let base = current.parent().unwrap_or_else(|| Path::new(""));
+                    let target = if target.is_absolute() {
+                        target
+                    } else {
+                        base.join(target)
+                    };
+                    let mut remainder = PathBuf::new();
+                    for remaining in components {
+                        remainder.push(remaining.as_os_str());
+                    }
+                    return create(&target.join(remainder), symlink_depth + 1);
+                }
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("{} exists and is not a directory", current.display()),
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    match fs::create_dir(&current) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                            return create(path, symlink_depth + 1);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    create(path, 0)
 }
 
 fn credential_root() -> std::io::Result<PathBuf> {
@@ -10896,6 +10958,25 @@ mod tests {
         });
         let _ = fs::remove_file(stdout);
         let _ = fs::remove_file(stderr);
+    }
+
+    #[test]
+    fn creates_log_files_through_dangling_directory_symlinks() {
+        let root = PathBuf::from(format!(
+            "/tmp/fractald-log-symlink-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("var/volatile")).expect("volatile directory");
+        std::os::unix::fs::symlink("volatile/log", root.join("var/log"))
+            .expect("volatile log symlink");
+
+        let path = root.join("var/log/fractald/symlink.service.stdout.log");
+        let file = open_log_file(&path, true).expect("open log through symlink");
+        drop(file);
+        assert!(root.join("var/volatile/log/fractald").is_dir());
+        assert!(path.is_file());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
