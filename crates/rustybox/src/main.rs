@@ -74,6 +74,14 @@ const MS_RELATIME: u64 = 1 << 21;
 const MS_STRICTATIME: u64 = 1 << 24;
 const MS_LAZYTIME: u64 = 1 << 25;
 
+const BLKID_PROGRAMS: &[&str] = &[
+    "/usr/bin/blkid",
+    "/usr/sbin/blkid",
+    "/bin/blkid",
+    "/sbin/blkid",
+    "blkid",
+];
+
 const MNT_FORCE: i32 = 1;
 const MNT_DETACH: i32 = 2;
 const MNT_EXPIRE: i32 = 4;
@@ -1368,7 +1376,7 @@ fn resolve_tagged_source(source: &OsStr) -> Result<OsString, String> {
         return Ok(link.into_os_string());
     }
 
-    for program in ["/usr/bin/blkid", "/usr/sbin/blkid", "blkid"] {
+    for program in BLKID_PROGRAMS {
         match Command::new(program)
             .args(&arguments)
             .stdin(Stdio::null())
@@ -1400,7 +1408,7 @@ fn resolve_tagged_source(source: &OsStr) -> Result<OsString, String> {
 }
 
 fn detect_filesystem_type(source: &OsStr) -> Option<String> {
-    for program in ["/usr/bin/blkid", "/usr/sbin/blkid", "blkid"] {
+    for program in BLKID_PROGRAMS {
         match Command::new(program)
             .args(["-s", "TYPE", "-o", "value"])
             .arg(source)
@@ -2215,6 +2223,12 @@ mod tests {
         assert_eq!(canonical_filesystem_type("msdos"), "vfat");
         assert_eq!(canonical_filesystem_type("Ext"), "ext4");
         assert_eq!(canonical_filesystem_type("XFS"), "xfs");
+    }
+
+    #[test]
+    fn blkid_search_covers_non_usrmerge_layouts() {
+        assert!(BLKID_PROGRAMS.contains(&"/bin/blkid"));
+        assert!(BLKID_PROGRAMS.contains(&"/sbin/blkid"));
     }
 
     #[test]

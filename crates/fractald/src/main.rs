@@ -27,6 +27,14 @@ use fractald_platform::{ExitKind, PidFd};
 use fractald_storage::{generate_services, parse_crypttab, parse_fstab};
 use fractald_supervisor::{ServiceSnapshot, Supervisor};
 
+const BLKID_PROGRAMS: &[&str] = &[
+    "/usr/bin/blkid",
+    "/usr/sbin/blkid",
+    "/bin/blkid",
+    "/sbin/blkid",
+    "blkid",
+];
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
@@ -530,7 +538,7 @@ fn resolve_crypttab_source(source: &str) -> Result<Option<String>, String> {
         ]),
         _ => unreachable!("validated storage query"),
     }
-    for program in ["/usr/bin/blkid", "/usr/sbin/blkid", "blkid"] {
+    for program in BLKID_PROGRAMS {
         match Command::new(program)
             .args(&arguments)
             .stdin(Stdio::null())
@@ -2090,5 +2098,11 @@ mod tests {
             resolve_crypttab_source("none").expect("none source"),
             Some("none".to_owned())
         );
+    }
+
+    #[test]
+    fn blkid_search_covers_non_usrmerge_layouts() {
+        assert!(BLKID_PROGRAMS.contains(&"/bin/blkid"));
+        assert!(BLKID_PROGRAMS.contains(&"/sbin/blkid"));
     }
 }
